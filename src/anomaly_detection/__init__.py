@@ -1,0 +1,25 @@
+"""Unsupervised anomaly detection toolkit.
+
+A dependency-light (numpy-only) set of detectors, evaluators and report
+utilities for spotting unusual rows in tabular data and point/level-shift
+anomalies in time series.
+"""
+
+from .generators import (
+    gaussian_clusters,
+    inject_scale_outliers,
+    inject_shifted_outliers,
+    make_tabular,
+    make_time_series,
+)
+
+__version__ = "0.1.0"
+
+__all__ = [
+    "gaussian_clusters",
+    "inject_scale_outliers",
+    "inject_shifted_outliers",
+    "make_tabular",
+    "make_time_series",
+    "__version__",
+]
