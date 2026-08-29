@@ -1,0 +1,170 @@
+import numpy as np
+import pytest
+
+from anomaly_detection import generators as g
+from anomaly_detection import models as m
+
+
+class TestIsolationForest:
+    def test_scores_in_unit_range(self):
+        X, _ = g.make_tabular(300, 4, 3, contamination=0.05, seed=1)
+        iforest = m.IsolationForest(n_estimators=50, max_samples=128, seed=7).fit(X)
+        s = iforest.score_samples(X)
+        assert s.shape == (300,)
+        assert s.min() >= 0.0 and s.max() <= 1.0
+
+    def test_outliers_score_higher_than_inliers(self):
+        X, y = g.make_tabular(600, 4, 3, contamination=0.05, outlier_types="shift", seed=2)
+        iforest = m.IsolationForest(n_estimators=100, max_samples=256, seed=7).fit(X)
+        s = iforest.score_samples(X)
+        assert s[y == 1].mean() > s[y == 0].mean()
+
+    def test_predict_flags_exact_contamination(self):
+        X, _ = g.make_tabular(500, 4, 3, contamination=0.05, seed=3)
+        iforest = m.IsolationForest(n_estimators=50, max_samples=128, seed=7)
+        flags = iforest.fit_predict(X, contamination=0.05)
+        assert flags.sum() == 25
+
+    def test_predict_zero_and_full_contamination(self):
+        X, _ = g.make_tabular(200, 4, 3, contamination=0.05, seed=4)
+        iforest = m.IsolationForest(n_estimators=20, max_samples=64, seed=7)
+        assert iforest.fit_predict(X, contamination=0.0).sum() == 0
+        assert iforest.fit_predict(X, contamination=1.0).sum() == 200
+
+    def test_deterministic_with_seed(self):
+        X, _ = g.make_tabular(300, 4, 3, contamination=0.05, seed=5)
+        s1 = m.IsolationForest(n_estimators=40, seed=9).fit(X).score_samples(X)
+        s2 = m.IsolationForest(n_estimators=40, seed=9).fit(X).score_samples(X)
+        assert np.array_equal(s1, s2)
+
+    def test_different_seeds_give_different_scores(self):
+        X, _ = g.make_tabular(300, 4, 3, contamination=0.05, seed=6)
+        s1 = m.IsolationForest(n_estimators=40, seed=9).fit(X).score_samples(X)
+        s2 = m.IsolationForest(n_estimators=40, seed=10).fit(X).score_samples(X)
+        assert not np.allclose(s1, s2)
+
+    def test_constant_columns_give_uniform_scores(self):
+        X = np.full((100, 3), 4.0)
+        iforest = m.IsolationForest(n_estimators=10, seed=1).fit(X)
+        s = iforest.score_samples(X)
+        assert np.allclose(s, s[0])
+        assert s[0] == 0.5
+
+    def test_max_samples_larger_than_data_clamps(self):
+        X, _ = g.make_tabular(50, 4, 2, contamination=0.05, seed=8)
+        iforest = m.IsolationForest(n_estimators=10, max_samples=1000, seed=1).fit(X)
+        assert iforest.score_samples(X).shape == (50,)
+
+    def test_single_estimator_works(self):
+        X, _ = g.make_tabular(100, 3, 2, contamination=0.05, seed=9)
+        s = m.IsolationForest(n_estimators=1, seed=1).fit(X).score_samples(X)
+        assert s.shape == (100,)
+
+    def test_too_few_samples_raises(self):
+        with pytest.raises(ValueError):
+            m.IsolationForest(seed=1).fit(np.zeros((1, 3)))
+
+    def test_scoring_before_fit_raises(self):
+        with pytest.raises(ValueError):
+            m.IsolationForest(seed=1).score_samples(np.zeros((5, 3)))
+
+    def test_rejects_1d_input(self):
+        with pytest.raises(ValueError):
+            m.IsolationForest(seed=1).fit(np.arange(10.0))
+
+    def test_fit_predict_matches_predict(self):
+        X, _ = g.make_tabular(300, 4, 3, contamination=0.05, seed=11)
+        iforest = m.IsolationForest(n_estimators=30, seed=3)
+        f1 = iforest.fit(X).predict(X, contamination=0.1)
+        f2 = iforest.fit_predict(X, contamination=0.1)
+        assert np.array_equal(f1, f2)
+
+
+class TestLocalOutlierFactor:
+    def test_scores_finite_and_positive(self):
+        X, _ = g.make_tabular(300, 4, 3, contamination=0.05, seed=12)
+        lof = m.LocalOutlierFactor(n_neighbors=20).fit(X)
+        s = lof.score_samples(X)
+        assert s.shape == (300,)
+        assert np.all(np.isfinite(s))
+        assert (s > 0).all()
+
+    def test_outliers_score_higher_than_inliers(self):
+        X, y = g.make_tabular(600, 4, 3, contamination=0.05, outlier_types="shift", seed=13)
+        lof = m.LocalOutlierFactor(n_neighbors=20)
+        s = lof.fit(X).score_samples(X)
+        assert s[y == 1].mean() > s[y == 0].mean()
+
+    def test_scale_invariance(self):
+        X, _ = g.make_tabular(200, 4, 3, contamination=0.05, seed=14)
+        s1 = m.LocalOutlierFactor(n_neighbors=15).fit(X).score_samples(X)
+        s2 = m.LocalOutlierFactor(n_neighbors=15).fit(X * 100.0).score_samples(X * 100.0)
+        assert np.allclose(s1, s2, rtol=1e-6)
+
+    def test_predict_flags_exact_contamination(self):
+        X, _ = g.make_tabular(500, 4, 3, contamination=0.05, seed=15)
+        lof = m.LocalOutlierFactor(n_neighbors=20)
+        flags = lof.fit_predict(X, contamination=0.05)
+        assert flags.sum() == 25
+
+    def test_predict_zero_contamination(self):
+        X, _ = g.make_tabular(200, 4, 3, contamination=0.05, seed=16)
+        lof = m.LocalOutlierFactor(n_neighbors=10)
+        assert lof.fit_predict(X, contamination=0.0).sum() == 0
+
+    def test_duplicate_points_no_nan(self):
+        X = np.repeat(np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]), 10, axis=0)
+        lof = m.LocalOutlierFactor(n_neighbors=5)
+        s = lof.fit(X).score_samples(X)
+        assert np.all(np.isfinite(s))
+        duplicates = s[0:10]
+        assert duplicates.mean() < 2.0
+
+    def test_n_neighbors_clamped(self):
+        X, _ = g.make_tabular(10, 3, 2, contamination=0.0, seed=17)
+        s = m.LocalOutlierFactor(n_neighbors=100).fit(X).score_samples(X)
+        assert np.all(np.isfinite(s))
+
+    def test_single_point_scores_one(self):
+        s = m.LocalOutlierFactor(n_neighbors=5).fit(np.array([[1.0, 2.0]])).score_samples(
+            np.array([[1.0, 2.0]])
+        )
+        assert np.allclose(s, 1.0)
+
+    def test_deterministic(self):
+        X, _ = g.make_tabular(300, 4, 3, contamination=0.05, seed=18)
+        s1 = m.LocalOutlierFactor(n_neighbors=15).fit(X).score_samples(X)
+        s2 = m.LocalOutlierFactor(n_neighbors=15).fit(X).score_samples(X)
+        assert np.array_equal(s1, s2)
+
+    def test_constant_data_all_scores_one(self):
+        X = np.full((50, 3), 2.0)
+        s = m.LocalOutlierFactor(n_neighbors=10).fit(X).score_samples(X)
+        assert np.allclose(s, 1.0)
+
+    def test_rejects_1d_input(self):
+        with pytest.raises(ValueError):
+            m.LocalOutlierFactor().fit(np.arange(10.0))
+
+    def test_fit_predict_matches_predict(self):
+        X, _ = g.make_tabular(300, 4, 3, contamination=0.05, seed=19)
+        lof = m.LocalOutlierFactor(n_neighbors=15)
+        f1 = lof.fit(X).predict(X, contamination=0.1)
+        f2 = lof.fit_predict(X, contamination=0.1)
+        assert np.array_equal(f1, f2)
+
+    def test_empty_input(self):
+        s = m.LocalOutlierFactor().fit(np.empty((0, 3))).score_samples(np.empty((0, 3)))
+        assert s.shape == (0,)
+
+
+class TestFlagsHelper:
+    def test_boundary_behaviour(self):
+        scores = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
+        flags = m._flags_from_contamination(scores, 0.2)
+        assert flags.sum() == 2
+        assert flags[-1] == 1 and flags[-2] == 1
+
+    def test_all_equal_scores_flags_all_at_positive_contamination(self):
+        flags = m._flags_from_contamination(np.full(10, 0.5), 0.1)
+        assert flags.sum() == 10
