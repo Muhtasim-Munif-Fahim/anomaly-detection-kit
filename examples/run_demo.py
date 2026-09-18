@@ -17,7 +17,7 @@ from anomaly_detection.evaluate import (
     threshold_sweep,
 )
 from anomaly_detection.generators import make_tabular
-from anomaly_detection.models import IsolationForest, LocalOutlierFactor, _flags_from_contamination
+from anomaly_detection.models import COPOD, IsolationForest, LocalOutlierFactor, _flags_from_contamination
 
 SEED = 42
 CONTAMINATION = 0.05
@@ -36,6 +36,7 @@ def main() -> None:
             n_estimators=200, max_samples=256, seed=SEED
         ).fit(X).score_samples,
         "local outlier factor": LocalOutlierFactor(n_neighbors=20).fit(X).score_samples,
+        "COPOD": COPOD().fit(X).score_samples,
     }
     detectors.update(STATISTICAL_SCORERS)
 
