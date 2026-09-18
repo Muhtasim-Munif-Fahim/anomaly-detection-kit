@@ -1,13 +1,15 @@
 """Model-based anomaly detectors.
 
-Two dependency-free models:
+Three dependency-free models:
 
 * :class:`IsolationForest` -- random feature + random split-point trees with
   path-length anomaly scoring (higher score = more anomalous).
 * :class:`LocalOutlierFactor` -- kNN reachability-density ratio, computed by
   brute force on pairwise distances (higher score = more anomalous).
+* :class:`COPOD` -- copula-based outlier detection from empirical left/right
+  tail CDFs and a skewness-corrected tail (higher score = more anomalous).
 
-Both expose the same interface: ``fit``, ``score_samples(X)`` returning
+All expose the same interface: ``fit``, ``score_samples(X)`` returning
 continuous anomaly scores, and ``fit_predict(X, contamination=...)``
 returning binary flags for the top ``contamination`` fraction.
 """
@@ -238,6 +240,108 @@ class LocalOutlierFactor:
         lrd = 1.0 / rd.mean(axis=1)
         lof = (lrd[order] / lrd[:, None]).mean(axis=1)
         self.scores_ = lof
+        return self.scores_
+
+    def predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
+        return _flags_from_contamination(self.score_samples(X), contamination)
+
+    def fit_predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
+        return self.fit(X).predict(X, contamination=contamination)
+
+
+def _column_skewness(X: np.ndarray) -> np.ndarray:
+    """Per-column skewness as in Li et al. 2020 (COPOD, eq. 11).
+
+    Numerator is the third central moment (``1/n``); the denominator is the
+    sample standard deviation (``ddof=1``) cubed. Constant columns return 0.
+    """
+    n, n_features = X.shape
+    if n < 2:
+        return np.zeros(n_features)
+    centered = X - X.mean(axis=0)
+    m3 = np.mean(centered ** 3, axis=0)
+    var = np.sum(centered * centered, axis=0) / (n - 1)
+    std = np.sqrt(np.maximum(var, 0.0))
+    out = np.zeros(n_features)
+    nz = std > 0.0
+    out[nz] = m3[nz] / (std[nz] ** 3)
+    return out
+
+
+def _ecdf_against(X: np.ndarray, sorted_ref: np.ndarray) -> np.ndarray:
+    """Column-wise empirical CDF of ``X`` relative to a pre-sorted reference.
+
+    ``sorted_ref`` must already be sorted along axis 0. Returns the fraction
+    of reference values that are ``<=`` each entry of ``X`` (ties share the
+    highest rank, matching ``searchsorted(..., side='right')``).
+    """
+    n_ref = sorted_ref.shape[0]
+    n, n_features = X.shape
+    U = np.empty((n, n_features), dtype=float)
+    for j in range(n_features):
+        U[:, j] = np.searchsorted(sorted_ref[:, j], X[:, j], side="right") / n_ref
+    return U
+
+
+class COPOD:
+    """Copula-based outlier detector (Li, Zhao, Botta, Ionescu & Hu, 2020).
+
+    Parameter-free. Each feature's empirical left-tail CDF and right-tail
+    survival function are treated as copula observations; the row score is
+    the most extreme of the three tail probabilities (left, right, and
+    skewness-corrected), on the ``-log`` scale.
+
+    ``fit`` stores the training columns so ``score_samples`` can score new
+    rows against those ECDFs. Scoring the training matrix itself matches
+    the original transductive Algorithm 1.
+    """
+
+    def __init__(self) -> None:
+        self.scores_: Optional[np.ndarray] = None
+        self._sorted: Optional[np.ndarray] = None
+        self._sorted_neg: Optional[np.ndarray] = None
+        self._n_train = 0
+        self._n_features: Optional[int] = None
+        self._skewness: Optional[np.ndarray] = None
+
+    def fit(self, X: np.ndarray) -> "COPOD":
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array of shape (n_samples, n_features)")
+        n = len(X)
+        if n < 1:
+            raise ValueError("COPOD needs at least one sample")
+        self._n_train = n
+        self._n_features = X.shape[1]
+        self._sorted = np.sort(X, axis=0)
+        self._sorted_neg = np.sort(-X, axis=0)
+        self._skewness = _column_skewness(X)
+        return self
+
+    def score_samples(self, X: np.ndarray) -> np.ndarray:
+        if self._sorted is None or self._sorted_neg is None or self._skewness is None:
+            raise ValueError("COPOD must be fitted before scoring")
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array of shape (n_samples, n_features)")
+        if X.shape[1] != self._n_features:
+            raise ValueError(
+                f"X has {X.shape[1]} features, but COPOD was fitted on {self._n_features}"
+            )
+        n = len(X)
+        if n == 0:
+            self.scores_ = np.empty(0)
+            return self.scores_
+        U = _ecdf_against(X, self._sorted)
+        V = _ecdf_against(-X, self._sorted_neg)
+        floor = 1.0 / (self._n_train + 1.0)
+        U = np.clip(U, floor, 1.0)
+        V = np.clip(V, floor, 1.0)
+        W = np.where(self._skewness < 0.0, U, V)
+        p_l = -np.log(U).sum(axis=1)
+        p_r = -np.log(V).sum(axis=1)
+        p_s = -np.log(W).sum(axis=1)
+        self.scores_ = np.maximum(np.maximum(p_l, p_r), p_s)
         return self.scores_
 
     def predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:

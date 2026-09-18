@@ -2,8 +2,8 @@
 
 A small, dependency-light toolkit for **unsupervised anomaly / outlier
 detection** in tabular data and time series. It ships classical statistical
-baselines (z-score, median/MAD, IQR fences, generalized ESD) and two
-self-contained models (isolation forest, local outlier factor), plus a
+baselines (z-score, median/MAD, IQR fences, generalized ESD) and three
+self-contained models (isolation forest, local outlier factor, COPOD), plus a
 seeded synthetic-data generator, evaluation metrics, and a markdown report
 renderer — all built on **numpy only** (no scipy, no sklearn).
 
@@ -19,8 +19,9 @@ readable and easy to extend.
   Tukey IQR fences, and the generalized ESD test. GESD critical values use
   an in-house Student-t quantile (regularised incomplete beta).
 - **Models** — an isolation forest with random feature/split trees and
-  path-length scoring, and a local outlier factor with kNN
-  reachability-density ratios.
+  path-length scoring, a local outlier factor with kNN
+  reachability-density ratios, and COPOD (copula-based outlier detection
+  from empirical left/right tail CDFs).
 - **Evaluation** — precision / recall / F1, rank-based ROC-AUC, threshold
   sweep with best-F1 selection, and a comparison table across detectors.
 - **Reports** — markdown renderer with per-detector score summaries, top
@@ -42,13 +43,14 @@ pip install -e .        # optional, exposes the `anomaly-detect` command
 
 ```python
 from anomaly_detection.generators import make_tabular
-from anomaly_detection.models import IsolationForest
+from anomaly_detection.models import COPOD, IsolationForest
 from anomaly_detection.evaluate import compare_detectors
 
 X, y_true = make_tabular(n_samples=600, contamination=0.05, seed=7)
 
 detectors = {
     "isolation forest": IsolationForest(seed=7).fit(X).score_samples,
+    "COPOD": COPOD().fit(X).score_samples,
 }
 rows = compare_detectors(X, y_true, detectors, contamination=0.05)
 print(rows[0]["f1"], rows[0]["auc"])
@@ -80,6 +82,7 @@ Or without installing: `python -m anomaly_detection <command> ...`.
 | ----------------- | ------------- | -------------------------------------- | ---------------------------- |
 | Isolation forest  | model         | higher = more anomalous                | `n_estimators`, `max_samples`|
 | Local outlier factor | model     | higher = more anomalous                | `n_neighbors`               |
+| COPOD             | model         | higher = more anomalous                | none (parameter-free)       |
 | z-score           | statistical   | max abs z per row                       | `threshold` (default 3.0)   |
 | Modified z-score  | statistical   | median/MAD robust z                    | `threshold` (default 3.5)   |
 | IQR fences        | statistical   | distance beyond fence / IQR            | `k` (default 1.5)           |
@@ -91,7 +94,7 @@ Or without installing: `python -m anomaly_detection <command> ...`.
 src/anomaly_detection/
 ├── generators.py   # seeded synthetic data (tabular + time series)
 ├── classic.py      # statistical baselines incl. GESD
-├── models.py       # isolation forest, local outlier factor
+├── models.py       # isolation forest, local outlier factor, COPOD
 ├── evaluate.py     # metrics, threshold sweep, comparison
 ├── report.py       # markdown rendering
 └── cli.py          # command line interface
@@ -106,7 +109,7 @@ tests/
 - Anomaly scores are only meaningful relative to one another on the same
   data.
 - Isolation forest and LOF are stochastic; pass a `seed` for reproducible
-  runs.
+  runs. COPOD is deterministic (empirical CDFs only).
 - Labels come from the synthetic generator, so the metrics measure recovery
   of known-injected outliers, not performance on unlabelled real-world data.
 - The generalized ESD test assumes a roughly normal baseline and can miss
