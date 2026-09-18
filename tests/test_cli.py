@@ -39,7 +39,7 @@ class TestDetect:
         rc = cli.main(["detect", "--data", str(csv_path), "--contamination", "0.05", "--seed", "1"])
         assert rc == 0
         out = capsys.readouterr().out
-        for name in ("isolation_forest", "lof", "copod", "zscore", "mad", "iqr"):
+        for name in ("isolation_forest", "lof", "copod", "hbos", "zscore", "mad", "iqr"):
             assert f"{name}: flagged" in out
 
     def test_prints_indices(self, tmp_path, capsys):
@@ -58,13 +58,14 @@ class TestDetect:
         assert "mad: flagged" in out
         assert "lof: flagged" not in out
 
-    def test_single_copod_detector(self, tmp_path, capsys):
+    def test_single_hbos_detector(self, tmp_path, capsys):
         csv_path = tmp_path / "data.csv"
-        _write_labelled_csv(csv_path, np.random.default_rng(3).normal(size=(80, 3)), np.zeros(80))
-        cli.main(["detect", "--data", str(csv_path), "--detector", "copod", "--contamination", "0.1"])
+        _write_labelled_csv(csv_path, np.random.default_rng(4).normal(size=(80, 3)), np.zeros(80))
+        cli.main(["detect", "--data", str(csv_path), "--detector", "hbos", "--contamination", "0.1"])
         out = capsys.readouterr().out
-        assert "copod: flagged" in out
+        assert "hbos: flagged" in out
         assert "lof: flagged" not in out
+        assert "copod: flagged" not in out
 
 
 class TestEvaluate:
@@ -80,6 +81,7 @@ class TestEvaluate:
         assert "detector" in out and "precision" in out
         assert "isolation_forest" in out
         assert "copod" in out
+        assert "hbos" in out
 
     def test_writes_report_file(self, tmp_path, capsys):
         csv_path = tmp_path / "data.csv"
@@ -127,4 +129,4 @@ class TestParser:
             parser.parse_args(["frobnicate"])
 
     def test_detector_choices(self):
-        assert cli.DETECTOR_NAMES == ["isolation_forest", "lof", "copod", "zscore", "mad", "iqr"]
+        assert cli.DETECTOR_NAMES == ["isolation_forest", "lof", "copod", "hbos", "zscore", "mad", "iqr"]

@@ -1,6 +1,6 @@
 """Model-based anomaly detectors.
 
-Three dependency-free models:
+Four dependency-free models:
 
 * :class:`IsolationForest` -- random feature + random split-point trees with
   path-length anomaly scoring (higher score = more anomalous).
@@ -8,6 +8,8 @@ Three dependency-free models:
   brute force on pairwise distances (higher score = more anomalous).
 * :class:`COPOD` -- copula-based outlier detection from empirical left/right
   tail CDFs and a skewness-corrected tail (higher score = more anomalous).
+* :class:`HBOS` -- histogram-based outlier score from independent univariate
+  histograms (higher score = more anomalous).
 
 All expose the same interface: ``fit``, ``score_samples(X)`` returning
 continuous anomaly scores, and ``fit_predict(X, contamination=...)``
@@ -342,6 +344,133 @@ class COPOD:
         p_r = -np.log(V).sum(axis=1)
         p_s = -np.log(W).sum(axis=1)
         self.scores_ = np.maximum(np.maximum(p_l, p_r), p_s)
+        return self.scores_
+
+    def predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
+        return _flags_from_contamination(self.score_samples(X), contamination)
+
+    def fit_predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
+        return self.fit(X).predict(X, contamination=contamination)
+
+
+def _hbos_column_heights(
+    values: np.ndarray,
+    edges: np.ndarray,
+    hist: np.ndarray,
+    floor: float,
+    tol: float,
+) -> np.ndarray:
+    """Histogram height for each value of one feature.
+
+    In-range points use the bin they fall into. Points slightly outside the
+    training range (within ``tol`` times the edge-bin width) inherit the
+    edge bin; farther points inherit ``floor`` (the regularised empty-bin
+    height), which scores them as rare.
+    """
+    n = values.size
+    n_bins = hist.size
+    heights = np.empty(n, dtype=float)
+    in_range = (values >= edges[0]) & (values <= edges[-1])
+    inds = np.searchsorted(edges, values, side="right") - 1
+    inds = np.clip(inds, 0, n_bins - 1)
+    heights[in_range] = hist[inds[in_range]]
+
+    below = values < edges[0]
+    if below.any():
+        width = edges[1] - edges[0]
+        near = (edges[0] - values[below]) <= width * tol
+        heights[below] = np.where(near, hist[0], floor)
+
+    above = values > edges[-1]
+    if above.any():
+        width = edges[-1] - edges[-2]
+        near = (values[above] - edges[-1]) <= width * tol
+        heights[above] = np.where(near, hist[-1], floor)
+
+    return heights
+
+
+class HBOS:
+    """Histogram-based outlier detector (Goldstein & Dengel, 2012).
+
+    Assumes feature independence. Each column is turned into a univariate
+    histogram of ``n_bins`` equal-width bins. Heights are scaled so the
+    tallest bin is 1 (equal feature weight) and empty bins are floored at
+    ``alpha``. The row score is the sum of ``-log`` heights: sparse bins
+    score high.
+
+    ``fit`` stores the per-column bin edges and heights so ``score_samples``
+    can score new rows. Values slightly outside the training range (within
+    ``tol`` times the edge-bin width) inherit the edge bin; farther values
+    inherit the empty-bin floor.
+    """
+
+    def __init__(
+        self,
+        n_bins: int = 10,
+        alpha: float = 0.1,
+        tol: float = 0.5,
+    ) -> None:
+        n_bins = int(n_bins)
+        if n_bins < 2:
+            raise ValueError("n_bins must be at least 2")
+        if not 0.0 <= float(alpha) < 1.0:
+            raise ValueError("alpha must be in [0, 1)")
+        if not 0.0 <= float(tol) <= 1.0:
+            raise ValueError("tol must be in [0, 1]")
+        self.n_bins = n_bins
+        self.alpha = float(alpha)
+        self.tol = float(tol)
+        self.scores_: Optional[np.ndarray] = None
+        self._hist: Optional[np.ndarray] = None
+        self._edges: Optional[np.ndarray] = None
+        self._n_features: Optional[int] = None
+        self._floor = self.alpha if self.alpha > 0.0 else 1e-12
+
+    def fit(self, X: np.ndarray) -> "HBOS":
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array of shape (n_samples, n_features)")
+        n, n_features = X.shape
+        if n < 1:
+            raise ValueError("HBOS needs at least one sample")
+        self._n_features = n_features
+        hist = np.empty((n_features, self.n_bins), dtype=float)
+        edges = np.empty((n_features, self.n_bins + 1), dtype=float)
+        for j in range(n_features):
+            counts, col_edges = np.histogram(X[:, j], bins=self.n_bins)
+            peak = float(counts.max())
+            if peak > 0.0:
+                col_hist = counts.astype(float) / peak
+            else:
+                col_hist = np.ones(self.n_bins, dtype=float)
+            hist[j] = np.maximum(col_hist, self._floor)
+            edges[j] = col_edges
+        self._hist = hist
+        self._edges = edges
+        return self
+
+    def score_samples(self, X: np.ndarray) -> np.ndarray:
+        if self._hist is None or self._edges is None:
+            raise ValueError("HBOS must be fitted before scoring")
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array of shape (n_samples, n_features)")
+        if X.shape[1] != self._n_features:
+            raise ValueError(
+                f"X has {X.shape[1]} features, but HBOS was fitted on {self._n_features}"
+            )
+        n = len(X)
+        if n == 0:
+            self.scores_ = np.empty(0)
+            return self.scores_
+        scores = np.zeros(n, dtype=float)
+        for j in range(self._n_features):
+            heights = _hbos_column_heights(
+                X[:, j], self._edges[j], self._hist[j], self._floor, self.tol
+            )
+            scores += -np.log(heights)
+        self.scores_ = scores
         return self.scores_
 
     def predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
