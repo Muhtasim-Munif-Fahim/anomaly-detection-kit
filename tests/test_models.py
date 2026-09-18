@@ -307,10 +307,18 @@ class TestHBOS:
         tp = int(((flags == 1) & (y == 1)).sum())
         assert tp >= int(y.sum()) * 0.6
 
-    def test_predict_flags_exact_contamination(self):
+    def test_predict_flags_at_least_contamination(self):
         X, _ = g.make_tabular(500, 4, 3, contamination=0.05, seed=33)
-        flags = m.HBOS().fit_predict(X, contamination=0.05)
-        assert flags.sum() == 25
+        hbos = m.HBOS().fit(X)
+        scores = hbos.score_samples(X)
+        flags = hbos.predict(X, contamination=0.05)
+        k = 25
+        threshold = np.partition(scores, len(scores) - k)[len(scores) - k]
+        # Equal-width bins create tied scores, so rows sharing the cutoff
+        # are all flagged (same rule as ``_flags_from_contamination``).
+        assert flags.sum() >= k
+        assert np.all(scores[flags == 1] >= threshold)
+        assert np.all(scores[flags == 0] < threshold)
 
     def test_predict_zero_and_full_contamination(self):
         X, _ = g.make_tabular(200, 4, 3, contamination=0.05, seed=34)
