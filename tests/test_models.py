@@ -220,7 +220,7 @@ class TestCOPOD:
         X = rng.normal(size=(100, 1))
         X[40, 0] = 50.0
         s = m.COPOD().fit(X).score_samples(X)
-        assert int(np.argmax(s)) == 40
+        assert s[40] == s.max()
 
     def test_constant_data_zero_scores(self):
         X = np.full((50, 3), 2.0)
