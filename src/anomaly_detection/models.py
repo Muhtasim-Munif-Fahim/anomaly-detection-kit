@@ -1,11 +1,13 @@
 """Model-based anomaly detectors.
 
-Four dependency-free models:
+Five dependency-free models:
 
 * :class:`IsolationForest` -- random feature + random split-point trees with
   path-length anomaly scoring (higher score = more anomalous).
 * :class:`LocalOutlierFactor` -- kNN reachability-density ratio, computed by
   brute force on pairwise distances (higher score = more anomalous).
+* :class:`KNN` -- k-nearest-neighbour distance (k-th neighbour or mean of
+  the k distances; higher score = more anomalous).
 * :class:`COPOD` -- copula-based outlier detection from empirical left/right
   tail CDFs and a skewness-corrected tail (higher score = more anomalous).
 * :class:`HBOS` -- histogram-based outlier score from independent univariate
@@ -242,6 +244,98 @@ class LocalOutlierFactor:
         lrd = 1.0 / rd.mean(axis=1)
         lof = (lrd[order] / lrd[:, None]).mean(axis=1)
         self.scores_ = lof
+        return self.scores_
+
+    def predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
+        return _flags_from_contamination(self.score_samples(X), contamination)
+
+    def fit_predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
+        return self.fit(X).predict(X, contamination=contamination)
+
+
+def _euclidean_distances(X: np.ndarray, Y: np.ndarray) -> np.ndarray:
+    """Pairwise Euclidean distances between rows of ``X`` and ``Y``."""
+    sqx = np.einsum("ij,ij->i", X, X)
+    sqy = np.einsum("ij,ij->i", Y, Y)
+    d2 = sqx[:, None] + sqy[None, :] - 2.0 * (X @ Y.T)
+    np.maximum(d2, 0.0, out=d2)
+    return np.sqrt(d2)
+
+
+class KNN:
+    """k-nearest-neighbour outlier detector (Ramaswamy, Rastogi & Shim, 2000).
+
+    ``fit`` stores the training rows. ``score_samples`` is the distance from
+    each query row to its neighbours in that reference set: ``method="largest"``
+    (default) uses the k-th neighbour, ``method="mean"`` averages the k
+    distances. Scoring the training matrix itself excludes each point as its
+    own neighbour, matching the usual transductive kNN outlier ranking.
+
+    Higher scores are more anomalous.
+    """
+
+    def __init__(self, n_neighbors: int = 5, method: str = "largest") -> None:
+        n_neighbors = int(n_neighbors)
+        if n_neighbors < 1:
+            raise ValueError("n_neighbors must be at least 1")
+        method = str(method)
+        if method not in ("largest", "mean"):
+            raise ValueError("method must be 'largest' or 'mean'")
+        self.n_neighbors = n_neighbors
+        self.method = method
+        self.scores_: Optional[np.ndarray] = None
+        self._X_train: Optional[np.ndarray] = None
+        self._n_features: Optional[int] = None
+
+    def fit(self, X: np.ndarray) -> "KNN":
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array of shape (n_samples, n_features)")
+        n = len(X)
+        if n < 1:
+            raise ValueError("KNN needs at least one sample")
+        self._X_train = np.array(X, dtype=float, copy=True)
+        self._n_features = X.shape[1]
+        self.scores_ = self._score_against(self._X_train, exclude_self=True)
+        return self
+
+    def _score_against(self, X: np.ndarray, exclude_self: bool) -> np.ndarray:
+        ref = self._X_train
+        if ref is None:
+            raise ValueError("KNN must be fitted before scoring")
+        n_query = len(X)
+        n_train = len(ref)
+        if n_query == 0:
+            return np.empty(0)
+        max_k = n_train - 1 if exclude_self else n_train
+        if max_k < 1:
+            return np.zeros(n_query)
+        k = min(self.n_neighbors, max_k)
+        D = _euclidean_distances(X, ref)
+        if exclude_self:
+            np.fill_diagonal(D, np.inf)
+        # k smallest distances per query row
+        idx = np.argpartition(D, kth=k - 1, axis=1)[:, :k]
+        dists = np.take_along_axis(D, idx, axis=1)
+        if self.method == "largest":
+            return dists.max(axis=1)
+        return dists.mean(axis=1)
+
+    def score_samples(self, X: np.ndarray) -> np.ndarray:
+        if self._X_train is None:
+            raise ValueError("KNN must be fitted before scoring")
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array of shape (n_samples, n_features)")
+        if X.shape[1] != self._n_features:
+            raise ValueError(
+                f"X has {X.shape[1]} features, but KNN was fitted on {self._n_features}"
+            )
+        same_train = X.shape == self._X_train.shape and np.array_equal(X, self._X_train)
+        if same_train:
+            self.scores_ = self._score_against(self._X_train, exclude_self=True)
+        else:
+            self.scores_ = self._score_against(X, exclude_self=False)
         return self.scores_
 
     def predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:

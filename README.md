@@ -2,10 +2,11 @@
 
 A small, dependency-light toolkit for **unsupervised anomaly / outlier
 detection** in tabular data and time series. It ships classical statistical
-baselines (z-score, median/MAD, IQR fences, generalized ESD) and four
-self-contained models (isolation forest, local outlier factor, COPOD,
-HBOS), plus a seeded synthetic-data generator, evaluation metrics, and a
-markdown report renderer — all built on **numpy only** (no scipy, no sklearn).
+baselines (z-score, median/MAD, IQR fences, generalized ESD) and five
+self-contained models (isolation forest, local outlier factor, k-nearest
+neighbours, COPOD, HBOS), plus a seeded synthetic-data generator,
+evaluation metrics, and a markdown report renderer — all built on
+**numpy only** (no scipy, no sklearn).
 
 Everything is implemented from first principles so the internals stay
 readable and easy to extend.
@@ -20,9 +21,10 @@ readable and easy to extend.
   an in-house Student-t quantile (regularised incomplete beta).
 - **Models** — an isolation forest with random feature/split trees and
   path-length scoring, a local outlier factor with kNN
-  reachability-density ratios, COPOD (copula-based outlier detection
-  from empirical left/right tail CDFs), and HBOS (histogram-based outlier
-  score from independent univariate histograms).
+  reachability-density ratios, k-nearest neighbours (k-th neighbour
+  distance, or the mean of the k distances), COPOD (copula-based outlier
+  detection from empirical left/right tail CDFs), and HBOS
+  (histogram-based outlier score from independent univariate histograms).
 - **Evaluation** — precision / recall / F1, rank-based ROC-AUC, threshold
   sweep with best-F1 selection, and a comparison table across detectors.
 - **Reports** — markdown renderer with per-detector score summaries, top
@@ -44,18 +46,32 @@ pip install -e .        # optional, exposes the `anomaly-detect` command
 
 ```python
 from anomaly_detection.generators import make_tabular
-from anomaly_detection.models import COPOD, HBOS, IsolationForest
+from anomaly_detection.models import COPOD, HBOS, IsolationForest, KNN
 from anomaly_detection.evaluate import compare_detectors
 
 X, y_true = make_tabular(n_samples=600, contamination=0.05, seed=7)
 
 detectors = {
     "isolation forest": IsolationForest(seed=7).fit(X).score_samples,
+    "KNN": KNN(n_neighbors=5).fit(X).score_samples,
     "COPOD": COPOD().fit(X).score_samples,
     "HBOS": HBOS().fit(X).score_samples,
 }
 rows = compare_detectors(X, y_true, detectors, contamination=0.05)
 print(rows[0]["f1"], rows[0]["auc"])
+```
+
+kNN scores each row by how far it sits from its neighbours in the fitted
+reference set. The default ``method="largest"`` is the distance to the
+k-th neighbour; ``method="mean"`` averages those k distances. Higher
+scores are more anomalous:
+
+```python
+from anomaly_detection.models import KNN
+
+knn = KNN(n_neighbors=5, method="largest").fit(X)
+scores = knn.score_samples(X)
+flags = knn.predict(X, contamination=0.05)
 ```
 
 ### Demo
@@ -84,6 +100,7 @@ Or without installing: `python -m anomaly_detection <command> ...`.
 | ----------------- | ------------- | -------------------------------------- | ---------------------------- |
 | Isolation forest  | model         | higher = more anomalous                | `n_estimators`, `max_samples`|
 | Local outlier factor | model     | higher = more anomalous                | `n_neighbors`               |
+| k-nearest neighbours | model     | higher = more anomalous                | `n_neighbors`, `method`     |
 | COPOD             | model         | higher = more anomalous                | none (parameter-free)       |
 | HBOS              | model         | higher = more anomalous                | `n_bins`, `alpha`, `tol`    |
 | z-score           | statistical   | max abs z per row                       | `threshold` (default 3.0)   |
@@ -97,7 +114,7 @@ Or without installing: `python -m anomaly_detection <command> ...`.
 src/anomaly_detection/
 ├── generators.py   # seeded synthetic data (tabular + time series)
 ├── classic.py      # statistical baselines incl. GESD
-├── models.py       # isolation forest, local outlier factor, COPOD, HBOS
+├── models.py       # isolation forest, LOF, kNN, COPOD, HBOS
 ├── evaluate.py     # metrics, threshold sweep, comparison
 ├── report.py       # markdown rendering
 └── cli.py          # command line interface
@@ -112,7 +129,8 @@ tests/
 - Anomaly scores are only meaningful relative to one another on the same
   data.
 - Isolation forest and LOF are stochastic; pass a `seed` for reproducible
-  runs. COPOD (empirical CDFs) and HBOS (histograms) are deterministic.
+  runs. COPOD (empirical CDFs), HBOS (histograms) and kNN (pairwise
+  distances) are deterministic.
 - Labels come from the synthetic generator, so the metrics measure recovery
   of known-injected outliers, not performance on unlabelled real-world data.
 - The generalized ESD test assumes a roughly normal baseline and can miss
