@@ -2,7 +2,8 @@
 
 A dependency-light (numpy-only) set of detectors, evaluators and report
 utilities for spotting unusual rows in tabular data and point/level-shift
-anomalies in time series.
+anomalies in time series. Model-based detectors include isolation forest,
+local outlier factor, k-nearest neighbours, COPOD and HBOS.
 """
 
 from . import classic, evaluate, generators, models, report
