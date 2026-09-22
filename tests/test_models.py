@@ -724,10 +724,15 @@ class TestOneClassSVM:
         assert s.shape == (40,)
         assert np.all(np.isfinite(s))
 
-    def test_linear_kernel_outliers_score_higher(self):
-        X, y = g.make_tabular(300, 4, 3, contamination=0.05, outlier_types="shift", seed=82)
+    def test_linear_kernel_flags_the_origin_side(self):
+        # A linear one-class SVM separates the sample from the origin, so a
+        # point on the origin side outscores the cloud (and a point farther
+        # out along the same direction looks more normal).
+        rng = np.random.default_rng(0)
+        X = rng.normal(loc=5.0, scale=0.3, size=(150, 2))
+        X[0] = [0.2, 0.2]
         s = m.OneClassSVM(kernel="linear").fit(X).score_samples(X)
-        assert s[y == 1].mean() > s[y == 0].mean()
+        assert s[0] == s.max()
 
     def test_linear_scores_scale_with_squared_data_scale(self):
         X, _ = g.make_tabular(120, 3, 2, contamination=0.05, seed=83)

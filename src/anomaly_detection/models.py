@@ -718,10 +718,11 @@ class OneClassSVM:
     ``kernel`` is ``"rbf"`` (default), ``"linear"``, or ``"poly"``. With
     ``gamma=None`` the scale is ``1 / (n_features * Var(X))`` from the
     training matrix (or 1 when that variance is 0). RBF with this scale is
-    invariant to translating or rescaling the features. The linear kernel
-    ignores ``gamma``. A polynomial kernel scores a feature-space half-space
-    rather than Euclidean isolation, so points far from the origin can look
-    ordinary; use it when that geometry is intended.
+    invariant to translating or rescaling the features and is the kernel
+    that ranks Euclidean outliers. The linear kernel ignores ``gamma`` and
+    separates the sample from the origin, so the anomalous side is toward
+    the origin. A polynomial kernel likewise scores a feature-space
+    half-space: points far from the origin can look ordinary.
 
     The solver is deterministic: the same matrix always yields the same scores.
     """

@@ -78,9 +78,11 @@ flags = knn.predict(X, contamination=0.05)
 ```
 
 One-class SVM fits a kernel half-space around the training rows. The
-default RBF kernel uses ``gamma = 1 / (n_features * Var(X))``. Scores are
-the negative decision function (inliers often fall below zero); higher
-scores are more anomalous:
+default RBF kernel uses ``gamma = 1 / (n_features * Var(X))`` and ranks
+points far from the training mass as anomalous. Scores are the negative
+decision function (inliers often fall below zero); higher scores are more
+anomalous. The linear kernel instead treats the origin side of the
+hyperplane as anomalous:
 
 ```python
 from anomaly_detection.models import OneClassSVM
