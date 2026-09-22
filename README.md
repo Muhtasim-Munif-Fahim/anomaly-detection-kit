@@ -2,9 +2,9 @@
 
 A small, dependency-light toolkit for **unsupervised anomaly / outlier
 detection** in tabular data and time series. It ships classical statistical
-baselines (z-score, median/MAD, IQR fences, generalized ESD) and five
+baselines (z-score, median/MAD, IQR fences, generalized ESD) and six
 self-contained models (isolation forest, local outlier factor, k-nearest
-neighbours, COPOD, HBOS), plus a seeded synthetic-data generator,
+neighbours, COPOD, HBOS, one-class SVM), plus a seeded synthetic-data generator,
 evaluation metrics, and a markdown report renderer — all built on
 **numpy only** (no scipy, no sklearn).
 
@@ -23,8 +23,10 @@ readable and easy to extend.
   path-length scoring, a local outlier factor with kNN
   reachability-density ratios, k-nearest neighbours (k-th neighbour
   distance, or the mean of the k distances), COPOD (copula-based outlier
-  detection from empirical left/right tail CDFs), and HBOS
-  (histogram-based outlier score from independent univariate histograms).
+  detection from empirical left/right tail CDFs), HBOS
+  (histogram-based outlier score from independent univariate histograms),
+  and a one-class SVM (Schölkopf dual, SMO) whose anomaly score is the
+  negative decision function.
 - **Evaluation** — precision / recall / F1, rank-based ROC-AUC, threshold
   sweep with best-F1 selection, and a comparison table across detectors.
 - **Reports** — markdown renderer with per-detector score summaries, top
@@ -46,7 +48,7 @@ pip install -e .        # optional, exposes the `anomaly-detect` command
 
 ```python
 from anomaly_detection.generators import make_tabular
-from anomaly_detection.models import COPOD, HBOS, IsolationForest, KNN
+from anomaly_detection.models import COPOD, HBOS, IsolationForest, KNN, OneClassSVM
 from anomaly_detection.evaluate import compare_detectors
 
 X, y_true = make_tabular(n_samples=600, contamination=0.05, seed=7)
@@ -56,6 +58,7 @@ detectors = {
     "KNN": KNN(n_neighbors=5).fit(X).score_samples,
     "COPOD": COPOD().fit(X).score_samples,
     "HBOS": HBOS().fit(X).score_samples,
+    "one-class SVM": OneClassSVM(nu=0.1).fit(X).score_samples,
 }
 rows = compare_detectors(X, y_true, detectors, contamination=0.05)
 print(rows[0]["f1"], rows[0]["auc"])
@@ -72,6 +75,21 @@ from anomaly_detection.models import KNN
 knn = KNN(n_neighbors=5, method="largest").fit(X)
 scores = knn.score_samples(X)
 flags = knn.predict(X, contamination=0.05)
+```
+
+One-class SVM fits a kernel half-space around the training rows. The
+default RBF kernel uses ``gamma = 1 / (n_features * Var(X))`` and ranks
+points far from the training mass as anomalous. Scores are the negative
+decision function (inliers often fall below zero); higher scores are more
+anomalous. The linear kernel instead treats the origin side of the
+hyperplane as anomalous:
+
+```python
+from anomaly_detection.models import OneClassSVM
+
+ocsvm = OneClassSVM(nu=0.1, kernel="rbf").fit(X)
+scores = ocsvm.score_samples(X)
+flags = ocsvm.predict(X, contamination=0.05)
 ```
 
 ### Demo
@@ -103,6 +121,7 @@ Or without installing: `python -m anomaly_detection <command> ...`.
 | k-nearest neighbours | model     | higher = more anomalous                | `n_neighbors`, `method`     |
 | COPOD             | model         | higher = more anomalous                | none (parameter-free)       |
 | HBOS              | model         | higher = more anomalous                | `n_bins`, `alpha`, `tol`    |
+| One-class SVM     | model         | higher = more anomalous                | `nu`, `kernel`, `gamma`     |
 | z-score           | statistical   | max abs z per row                       | `threshold` (default 3.0)   |
 | Modified z-score  | statistical   | median/MAD robust z                    | `threshold` (default 3.5)   |
 | IQR fences        | statistical   | distance beyond fence / IQR            | `k` (default 1.5)           |
@@ -114,7 +133,7 @@ Or without installing: `python -m anomaly_detection <command> ...`.
 src/anomaly_detection/
 ├── generators.py   # seeded synthetic data (tabular + time series)
 ├── classic.py      # statistical baselines incl. GESD
-├── models.py       # isolation forest, LOF, kNN, COPOD, HBOS
+├── models.py       # isolation forest, LOF, kNN, COPOD, HBOS, one-class SVM
 ├── evaluate.py     # metrics, threshold sweep, comparison
 ├── report.py       # markdown rendering
 └── cli.py          # command line interface
@@ -129,8 +148,8 @@ tests/
 - Anomaly scores are only meaningful relative to one another on the same
   data.
 - Isolation forest and LOF are stochastic; pass a `seed` for reproducible
-  runs. COPOD (empirical CDFs), HBOS (histograms) and kNN (pairwise
-  distances) are deterministic.
+  runs. COPOD (empirical CDFs), HBOS (histograms), kNN (pairwise
+  distances) and one-class SVM (SMO on a fixed kernel) are deterministic.
 - Labels come from the synthetic generator, so the metrics measure recovery
   of known-injected outliers, not performance on unlabelled real-world data.
 - The generalized ESD test assumes a roughly normal baseline and can miss

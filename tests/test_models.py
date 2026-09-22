@@ -581,6 +581,212 @@ class TestHBOS:
         assert np.all(np.isfinite(s))
 
 
+class TestOneClassSVM:
+    def test_scores_finite(self):
+        X, _ = g.make_tabular(300, 4, 3, contamination=0.05, seed=70)
+        s = m.OneClassSVM().fit(X).score_samples(X)
+        assert s.shape == (300,)
+        assert np.all(np.isfinite(s))
+
+    def test_outliers_score_higher_than_inliers(self):
+        X, y = g.make_tabular(600, 4, 3, contamination=0.05, outlier_types="shift", seed=71)
+        s = m.OneClassSVM().fit(X).score_samples(X)
+        assert s[y == 1].mean() > s[y == 0].mean()
+
+    def test_recovers_shift_outliers_from_generator(self):
+        X, y = g.make_tabular(600, 4, 3, contamination=0.05, outlier_types="shift", seed=9)
+        flags = m.OneClassSVM().fit(X).predict(X, contamination=0.05)
+        tp = int(((flags == 1) & (y == 1)).sum())
+        assert tp >= int(y.sum()) * 0.8
+
+    def test_recovers_mixed_outliers_from_generator(self):
+        X, y = g.make_tabular(600, 4, 3, contamination=0.05, seed=72)
+        flags = m.OneClassSVM().fit(X).predict(X, contamination=0.05)
+        tp = int(((flags == 1) & (y == 1)).sum())
+        assert tp >= int(y.sum()) * 0.6
+
+    def test_recovers_obvious_injected_outliers(self):
+        rng = np.random.default_rng(0)
+        X = rng.normal(size=(200, 2))
+        X[0] = [12.0, 12.0]
+        X[1] = [-12.0, -12.0]
+        flags = m.OneClassSVM().fit(X).predict(X, contamination=0.02)
+        assert flags[0] == 1
+        assert flags[1] == 1
+
+    def test_predict_flags_exact_contamination(self):
+        X, _ = g.make_tabular(500, 4, 3, contamination=0.05, seed=73)
+        flags = m.OneClassSVM().fit_predict(X, contamination=0.05)
+        assert flags.sum() == 25
+
+    def test_predict_zero_and_full_contamination(self):
+        X, _ = g.make_tabular(200, 4, 3, contamination=0.05, seed=74)
+        ocsvm = m.OneClassSVM().fit(X)
+        assert ocsvm.predict(X, contamination=0.0).sum() == 0
+        assert ocsvm.predict(X, contamination=1.0).sum() == 200
+
+    def test_scale_invariance(self):
+        X, _ = g.make_tabular(200, 4, 3, contamination=0.05, seed=75)
+        s1 = m.OneClassSVM().fit(X).score_samples(X)
+        s2 = m.OneClassSVM().fit(X * 100.0).score_samples(X * 100.0)
+        assert np.allclose(s1, s2)
+
+    def test_translation_invariance(self):
+        X, _ = g.make_tabular(200, 4, 3, contamination=0.05, seed=76)
+        s1 = m.OneClassSVM().fit(X).score_samples(X)
+        s2 = m.OneClassSVM().fit(X + 50.0).score_samples(X + 50.0)
+        assert np.allclose(s1, s2)
+
+    def test_both_tails_score_high(self):
+        rng = np.random.default_rng(0)
+        X = rng.normal(size=(200, 2))
+        X[0] = [-12.0, -12.0]
+        X[1] = [12.0, 12.0]
+        s = m.OneClassSVM().fit(X).score_samples(X)
+        assert s[0] > np.median(s)
+        assert s[1] > np.median(s)
+
+    def test_obvious_univariate_outlier_is_highest(self):
+        rng = np.random.default_rng(1)
+        X = rng.normal(size=(100, 1))
+        X[40, 0] = 50.0
+        s = m.OneClassSVM().fit(X).score_samples(X)
+        assert s[40] == s.max()
+
+    def test_constant_data_zero_scores(self):
+        X = np.full((50, 3), 2.0)
+        s = m.OneClassSVM().fit(X).score_samples(X)
+        assert np.allclose(s, 0.0)
+
+    def test_deterministic(self):
+        X, _ = g.make_tabular(300, 4, 3, contamination=0.05, seed=77)
+        s1 = m.OneClassSVM().fit(X).score_samples(X)
+        s2 = m.OneClassSVM().fit(X).score_samples(X)
+        assert np.array_equal(s1, s2)
+
+    def test_out_of_sample_extreme_scores_high(self):
+        rng = np.random.default_rng(2)
+        X = rng.normal(size=(200, 3))
+        ocsvm = m.OneClassSVM().fit(X)
+        s_in = ocsvm.score_samples(X)
+        s_ext = ocsvm.score_samples(np.array([[80.0, 80.0, 80.0]]))
+        assert s_ext[0] > s_in.max()
+
+    def test_empty_score_after_fit(self):
+        X, _ = g.make_tabular(20, 3, 2, contamination=0.0, seed=78)
+        s = m.OneClassSVM().fit(X).score_samples(np.empty((0, 3)))
+        assert s.shape == (0,)
+
+    def test_single_sample_zero_score(self):
+        s = m.OneClassSVM().fit(np.array([[1.0, 2.0]])).score_samples(np.array([[1.0, 2.0]]))
+        assert np.allclose(s, 0.0)
+
+    def test_too_few_samples_raises(self):
+        with pytest.raises(ValueError):
+            m.OneClassSVM().fit(np.zeros((0, 3)))
+
+    def test_scoring_before_fit_raises(self):
+        with pytest.raises(ValueError):
+            m.OneClassSVM().score_samples(np.zeros((5, 3)))
+
+    def test_rejects_1d_input(self):
+        with pytest.raises(ValueError):
+            m.OneClassSVM().fit(np.arange(10.0))
+
+    def test_feature_mismatch_raises(self):
+        ocsvm = m.OneClassSVM().fit(np.zeros((10, 3)))
+        with pytest.raises(ValueError):
+            ocsvm.score_samples(np.zeros((4, 2)))
+
+    def test_fit_predict_matches_predict(self):
+        X, _ = g.make_tabular(300, 4, 3, contamination=0.05, seed=79)
+        ocsvm = m.OneClassSVM()
+        f1 = ocsvm.fit(X).predict(X, contamination=0.1)
+        f2 = ocsvm.fit_predict(X, contamination=0.1)
+        assert np.array_equal(f1, f2)
+
+    def test_dual_weights_respect_nu_box(self):
+        X, _ = g.make_tabular(300, 4, 3, contamination=0.05, seed=80)
+        nu = 0.1
+        model = m.OneClassSVM(nu=nu, tol=1e-4).fit(X)
+        alpha = model._alpha
+        C = 1.0 / (nu * len(X))
+        assert alpha is not None
+        assert abs(float(alpha.sum()) - 1.0) < 1e-6
+        assert float(alpha.min()) >= -1e-8
+        assert float(alpha.max()) <= C + 1e-6
+        assert float(np.mean(alpha > 1e-6)) + 1e-6 >= nu
+        assert float(np.mean(alpha >= C - 1e-5)) <= nu + 0.02
+
+    def test_nu_one_is_finite(self):
+        X, _ = g.make_tabular(40, 3, 2, contamination=0.0, seed=81)
+        s = m.OneClassSVM(nu=1.0).fit(X).score_samples(X)
+        assert s.shape == (40,)
+        assert np.all(np.isfinite(s))
+
+    def test_linear_kernel_flags_the_origin_side(self):
+        # A linear one-class SVM separates the sample from the origin, so a
+        # point on the origin side outscores the cloud (and a point farther
+        # out along the same direction looks more normal).
+        rng = np.random.default_rng(0)
+        X = rng.normal(loc=5.0, scale=0.3, size=(150, 2))
+        X[0] = [0.2, 0.2]
+        s = m.OneClassSVM(kernel="linear").fit(X).score_samples(X)
+        assert s[0] == s.max()
+
+    def test_linear_scores_scale_with_squared_data_scale(self):
+        X, _ = g.make_tabular(120, 3, 2, contamination=0.05, seed=83)
+        s1 = m.OneClassSVM(kernel="linear").fit(X).score_samples(X)
+        s2 = m.OneClassSVM(kernel="linear").fit(X * 10.0).score_samples(X * 10.0)
+        assert np.allclose(s2, s1 * 100.0, rtol=1e-5, atol=1e-6)
+
+    def test_poly_kernel_scores_are_finite(self):
+        X, _ = g.make_tabular(80, 3, 2, contamination=0.05, seed=84)
+        s = m.OneClassSVM(kernel="poly", degree=3, coef0=1.0).fit(X).score_samples(X)
+        assert s.shape == (80,)
+        assert np.all(np.isfinite(s))
+
+    def test_invalid_nu_raises(self):
+        with pytest.raises(ValueError):
+            m.OneClassSVM(nu=0.0)
+        with pytest.raises(ValueError):
+            m.OneClassSVM(nu=1.1)
+        with pytest.raises(ValueError):
+            m.OneClassSVM(nu=-0.2)
+
+    def test_invalid_kernel_raises(self):
+        with pytest.raises(ValueError):
+            m.OneClassSVM(kernel="sigmoid")
+
+    def test_invalid_gamma_raises(self):
+        with pytest.raises(ValueError):
+            m.OneClassSVM(gamma=0.0)
+        with pytest.raises(ValueError):
+            m.OneClassSVM(gamma=-1.0)
+
+    def test_invalid_degree_raises(self):
+        with pytest.raises(ValueError):
+            m.OneClassSVM(kernel="poly", degree=0)
+
+    def test_invalid_tol_raises(self):
+        with pytest.raises(ValueError):
+            m.OneClassSVM(tol=0.0)
+
+    def test_invalid_max_iter_raises(self):
+        with pytest.raises(ValueError):
+            m.OneClassSVM(max_iter=0)
+
+    def test_invalid_coef0_raises(self):
+        with pytest.raises(ValueError):
+            m.OneClassSVM(coef0=float("nan"))
+
+    def test_fit_does_not_mutate_input(self):
+        X, _ = g.make_tabular(30, 3, 2, contamination=0.0, seed=85)
+        original = X.copy()
+        m.OneClassSVM().fit(X).score_samples(X)
+        assert np.array_equal(X, original)
+
+
 class TestFlagsHelper:
     def test_boundary_behaviour(self):
         scores = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])

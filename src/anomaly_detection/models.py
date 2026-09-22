@@ -1,6 +1,6 @@
 """Model-based anomaly detectors.
 
-Five dependency-free models:
+Six dependency-free models:
 
 * :class:`IsolationForest` -- random feature + random split-point trees with
   path-length anomaly scoring (higher score = more anomalous).
@@ -12,6 +12,8 @@ Five dependency-free models:
   tail CDFs and a skewness-corrected tail (higher score = more anomalous).
 * :class:`HBOS` -- histogram-based outlier score from independent univariate
   histograms (higher score = more anomalous).
+* :class:`OneClassSVM` -- one-class SVM (Schölkopf et al.) scored by the
+  negative decision function (higher score = more anomalous).
 
 All expose the same interface: ``fit``, ``score_samples(X)`` returning
 continuous anomaly scores, and ``fit_predict(X, contamination=...)``
@@ -565,6 +567,265 @@ class HBOS:
             )
             scores += -np.log(heights)
         self.scores_ = scores
+        return self.scores_
+
+    def predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
+        return _flags_from_contamination(self.score_samples(X), contamination)
+
+    def fit_predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
+        return self.fit(X).predict(X, contamination=contamination)
+
+
+def _scale_gamma(X: np.ndarray) -> float:
+    """RBF / polynomial scale ``1 / (n_features * Var(X))``.
+
+    Variance is the population variance of every entry (``ddof=0``). A
+    zero or non-finite variance falls back to 1, matching the usual
+    ``gamma="scale"`` heuristic.
+    """
+    if X.size == 0 or X.shape[1] == 0:
+        return 1.0
+    var = float(np.var(X))
+    if not math.isfinite(var) or var <= 0.0:
+        return 1.0
+    return 1.0 / (X.shape[1] * var)
+
+
+def _ocsvm_kernel(
+    X: np.ndarray,
+    Y: np.ndarray,
+    kernel: str,
+    gamma: float,
+    degree: int,
+    coef0: float,
+) -> np.ndarray:
+    """Gram matrix between rows of ``X`` and rows of ``Y``."""
+    if kernel == "linear":
+        return X @ Y.T
+    dots = X @ Y.T
+    if kernel == "poly":
+        return (gamma * dots + coef0) ** degree
+    x2 = np.einsum("ij,ij->i", X, X)
+    y2 = np.einsum("ij,ij->i", Y, Y)
+    d2 = x2[:, None] + y2[None, :] - 2.0 * dots
+    np.maximum(d2, 0.0, out=d2)
+    return np.exp(-gamma * d2)
+
+
+def _rho_from_gradient(G: np.ndarray, alpha: np.ndarray, C: float) -> float:
+    """Decision offset from the dual gradient ``G = K @ alpha``.
+
+    Unbounded support vectors (``0 < alpha < C``) sit on the margin, so
+    ``rho`` is their mean gradient. If every weight is at a bound, ``rho``
+    is the midpoint of the KKT bounds.
+    """
+    eps = 1e-6 * C
+    free = (alpha > eps) & (alpha < C - eps)
+    if np.any(free):
+        return float(np.mean(G[free]))
+    upper = G[alpha < C - eps]
+    lower = G[alpha > eps]
+    if upper.size and lower.size:
+        return 0.5 * (float(np.min(upper)) + float(np.max(lower)))
+    if upper.size:
+        return float(np.min(upper))
+    if lower.size:
+        return float(np.max(lower))
+    return float(np.mean(G))
+
+
+def _solve_one_class_dual(
+    K: np.ndarray, nu: float, tol: float, max_iter: int
+) -> tuple[np.ndarray, float]:
+    """SMO for the Schölkopf one-class dual.
+
+    Minimises ``0.5 * alpha @ K @ alpha`` subject to ``sum(alpha) == 1``
+    and ``0 <= alpha_i <= 1/(nu * n)``. Pair selection maximises the
+    estimated decrease (second-order working set). Returns ``(alpha, rho)``.
+    """
+    n = int(K.shape[0])
+    C = 1.0 / (nu * float(n))
+    # nu == 1 leaves a single feasible point: every weight sits at the box.
+    if nu >= 1.0:
+        alpha = np.full(n, 1.0 / n)
+        alpha[-1] = 1.0 - float(alpha[:-1].sum())
+        return alpha, float(np.max(K @ alpha))
+
+    alpha = np.full(n, 1.0 / n)
+    alpha[-1] = 1.0 - float(alpha[:-1].sum())
+    G = K @ alpha
+    diag = np.diag(K).copy()
+    bound_eps = 1e-10 * C
+
+    for n_iter in range(1, max_iter + 1):
+        up = np.flatnonzero(alpha < C - bound_eps)
+        low = np.flatnonzero(alpha > bound_eps)
+        if up.size == 0 or low.size == 0:
+            break
+        i = int(up[np.argmin(G[up])])
+        viol = G - G[i]
+        eta_row = diag[i] + diag - 2.0 * K[i]
+        eligible = np.zeros(n, dtype=bool)
+        eligible[low] = True
+        eligible[i] = False
+        eligible &= viol > 0.0
+        if not np.any(eligible):
+            break
+        eta_m = eta_row[eligible]
+        viol_m = viol[eligible]
+        gain = np.empty(eta_m.size, dtype=float)
+        positive_eta = eta_m > 1e-12
+        gain[positive_eta] = (viol_m[positive_eta] ** 2) / eta_m[positive_eta]
+        gain[~positive_eta] = np.inf
+        j = int(np.flatnonzero(eligible)[int(np.argmax(gain))])
+        gap = float(G[j] - G[i])
+        scale = max(1.0, abs(float(G[i])), abs(float(G[j])))
+        if gap <= tol * scale:
+            break
+        room = min(C - float(alpha[i]), float(alpha[j]))
+        eta_ij = float(eta_row[j])
+        if eta_ij <= 1e-12:
+            delta = room
+        else:
+            delta = gap / eta_ij
+            if delta > room:
+                delta = room
+            if delta < 0.0:
+                delta = 0.0
+        if delta <= 1e-14:
+            break
+        alpha[i] += delta
+        alpha[j] -= delta
+        G += delta * (K[:, i] - K[:, j])
+        if n_iter % 40 == 0:
+            G = K @ alpha
+
+    return alpha, _rho_from_gradient(K @ alpha, alpha, C)
+
+
+class OneClassSVM:
+    """One-class SVM anomaly detector (Schölkopf, Platt, Shawe-Taylor, Smola, Williamson, 2001).
+
+    ``fit`` solves the dual on the training Gram matrix with SMO. The
+    anomaly score of a row is the negative decision function
+
+    ``rho - sum_i alpha_i K(x_i, x)``
+
+    so points outside the half-space score higher. ``nu`` is an upper bound
+    on the fraction of training margin errors and a lower bound on the
+    fraction of support vectors.
+
+    ``kernel`` is ``"rbf"`` (default), ``"linear"``, or ``"poly"``. With
+    ``gamma=None`` the scale is ``1 / (n_features * Var(X))`` from the
+    training matrix (or 1 when that variance is 0). RBF with this scale is
+    invariant to translating or rescaling the features and is the kernel
+    that ranks Euclidean outliers. The linear kernel ignores ``gamma`` and
+    separates the sample from the origin, so the anomalous side is toward
+    the origin. A polynomial kernel likewise scores a feature-space
+    half-space: points far from the origin can look ordinary.
+
+    The solver is deterministic: the same matrix always yields the same scores.
+    """
+
+    def __init__(
+        self,
+        nu: float = 0.1,
+        kernel: str = "rbf",
+        gamma: Optional[float] = None,
+        degree: int = 3,
+        coef0: float = 0.0,
+        tol: float = 1e-3,
+        max_iter: int = 5000,
+    ) -> None:
+        nu = float(nu)
+        if not math.isfinite(nu) or not 0.0 < nu <= 1.0:
+            raise ValueError("nu must be in (0, 1]")
+        kernel = str(kernel)
+        if kernel not in ("rbf", "linear", "poly"):
+            raise ValueError("kernel must be 'rbf', 'linear' or 'poly'")
+        if gamma is not None:
+            gamma = float(gamma)
+            if not math.isfinite(gamma) or gamma <= 0.0:
+                raise ValueError(
+                    "gamma must be a positive finite number, or None to use the scale heuristic"
+                )
+        degree = int(degree)
+        if degree < 1:
+            raise ValueError("degree must be at least 1")
+        coef0 = float(coef0)
+        if not math.isfinite(coef0):
+            raise ValueError("coef0 must be finite")
+        tol = float(tol)
+        if not math.isfinite(tol) or tol <= 0.0:
+            raise ValueError("tol must be a positive finite number")
+        max_iter = int(max_iter)
+        if max_iter < 1:
+            raise ValueError("max_iter must be at least 1")
+        self.nu = nu
+        self.kernel = kernel
+        self.gamma = gamma
+        self.degree = degree
+        self.coef0 = coef0
+        self.tol = tol
+        self.max_iter = max_iter
+        self.scores_: Optional[np.ndarray] = None
+        self._X_train: Optional[np.ndarray] = None
+        self._alpha: Optional[np.ndarray] = None
+        self._rho: Optional[float] = None
+        self._gamma: Optional[float] = None
+        self._n_features: Optional[int] = None
+
+    def fit(self, X: np.ndarray) -> "OneClassSVM":
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array of shape (n_samples, n_features)")
+        n = len(X)
+        if n < 1:
+            raise ValueError("OneClassSVM needs at least one sample")
+        self._n_features = int(X.shape[1])
+        self._X_train = np.array(X, dtype=float, copy=True)
+        if self.gamma is None:
+            self._gamma = _scale_gamma(self._X_train)
+        else:
+            self._gamma = float(self.gamma)
+        K = _ocsvm_kernel(
+            self._X_train,
+            self._X_train,
+            self.kernel,
+            self._gamma,
+            self.degree,
+            self.coef0,
+        )
+        if not np.isfinite(K).all():
+            raise ValueError("kernel matrix is not finite; check gamma, degree and coef0")
+        self._alpha, self._rho = _solve_one_class_dual(K, self.nu, self.tol, self.max_iter)
+        return self
+
+    def score_samples(self, X: np.ndarray) -> np.ndarray:
+        if (
+            self._X_train is None
+            or self._alpha is None
+            or self._rho is None
+            or self._gamma is None
+        ):
+            raise ValueError("OneClassSVM must be fitted before scoring")
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array of shape (n_samples, n_features)")
+        if X.shape[1] != self._n_features:
+            raise ValueError(
+                f"X has {X.shape[1]} features, but OneClassSVM was fitted on {self._n_features}"
+            )
+        n = len(X)
+        if n == 0:
+            self.scores_ = np.empty(0)
+            return self.scores_
+        K = _ocsvm_kernel(
+            X, self._X_train, self.kernel, self._gamma, self.degree, self.coef0
+        )
+        if not np.isfinite(K).all():
+            raise ValueError("kernel matrix is not finite; check gamma, degree and coef0")
+        self.scores_ = self._rho - K @ self._alpha
         return self.scores_
 
     def predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
