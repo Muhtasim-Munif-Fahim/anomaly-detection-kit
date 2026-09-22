@@ -103,7 +103,7 @@ def caveats() -> str:
   contamination fraction or on fixed statistical thresholds.
 - Anomaly scores are only meaningful relative to one another on the same data.
 - Isolation forest and LOF are stochastic; pass a ``seed`` for reproducible
-  runs. COPOD, HBOS and kNN are deterministic.
+  runs. COPOD, HBOS, kNN and one-class SVM are deterministic.
 - Labels come from the synthetic generator, so metrics measure recovery of
   known-injected outliers, not performance on unlabelled real-world data.
 - The generalized ESD test assumes a roughly normal baseline and can miss

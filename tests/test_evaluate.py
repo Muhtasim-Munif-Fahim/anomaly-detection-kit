@@ -143,10 +143,19 @@ class TestCompareDetectors:
             "copod": m.COPOD().fit(X).score_samples,
             "hbos": m.HBOS().fit(X).score_samples,
             "knn": m.KNN(n_neighbors=5).fit(X).score_samples,
+            "ocsvm": m.OneClassSVM(nu=0.1).fit(X).score_samples,
             "zscore": cl.zscore_scores,
         }
         rows = ev.compare_detectors(X, y, detectors, contamination=0.05)
-        assert sorted(r["detector"] for r in rows) == ["copod", "hbos", "iforest", "knn", "lof", "zscore"]
+        assert sorted(r["detector"] for r in rows) == [
+            "copod",
+            "hbos",
+            "iforest",
+            "knn",
+            "lof",
+            "ocsvm",
+            "zscore",
+        ]
         f1s = [r["f1"] for r in rows]
         assert f1s == sorted(f1s, reverse=True)
         assert all("detector" in r for r in rows)
@@ -184,5 +193,14 @@ class TestCompareDetectors:
             X, y, {"knn": m.KNN(n_neighbors=5).fit(X).score_samples}, contamination=0.05
         )
         assert rows[0]["detector"] == "knn"
+        assert rows[0]["auc"] > 0.9
+        assert rows[0]["f1"] > 0.7
+
+    def test_ocsvm_recovers_synthetic_shift_outliers(self):
+        X, y = g.make_tabular(400, 4, 3, contamination=0.05, outlier_types="shift", seed=8)
+        rows = ev.compare_detectors(
+            X, y, {"ocsvm": m.OneClassSVM(nu=0.1).fit(X).score_samples}, contamination=0.05
+        )
+        assert rows[0]["detector"] == "ocsvm"
         assert rows[0]["auc"] > 0.9
         assert rows[0]["f1"] > 0.7
