@@ -39,7 +39,7 @@ class TestDetect:
         rc = cli.main(["detect", "--data", str(csv_path), "--contamination", "0.05", "--seed", "1"])
         assert rc == 0
         out = capsys.readouterr().out
-        for name in ("isolation_forest", "lof", "copod", "hbos", "knn", "ocsvm", "zscore", "mad", "iqr"):
+        for name in ("isolation_forest", "lof", "copod", "hbos", "knn", "ocsvm", "elliptic", "zscore", "mad", "iqr"):
             assert f"{name}: flagged" in out
 
     def test_prints_indices(self, tmp_path, capsys):
@@ -82,6 +82,13 @@ class TestDetect:
         cli.main(["detect", "--data", str(csv_path), "--detector", "ocsvm", "--contamination", "0.1"])
         out = capsys.readouterr().out
         assert "ocsvm: flagged" in out
+
+    def test_single_elliptic_detector(self, tmp_path, capsys):
+        csv_path = tmp_path / "data.csv"
+        cli.main(["simulate", "--out", str(csv_path), "--n-samples", "120", "--seed", "0"])
+        cli.main(["detect", "--data", str(csv_path), "--detector", "elliptic", "--contamination", "0.1"])
+        out = capsys.readouterr().out
+        assert "elliptic: flagged" in out
         assert "knn: flagged" not in out
         assert "hbos: flagged" not in out
 
@@ -156,6 +163,7 @@ class TestParser:
             "hbos",
             "knn",
             "ocsvm",
+            "elliptic",
             "zscore",
             "mad",
             "iqr",

@@ -1,6 +1,6 @@
 """Model-based anomaly detectors.
 
-Six dependency-free models:
+Seven dependency-free models:
 
 * :class:`IsolationForest` -- random feature + random split-point trees with
   path-length anomaly scoring (higher score = more anomalous).
@@ -14,6 +14,8 @@ Six dependency-free models:
   histograms (higher score = more anomalous).
 * :class:`OneClassSVM` -- one-class SVM (Schölkopf et al.) scored by the
   negative decision function (higher score = more anomalous).
+* :class:`EllipticEnvelope` -- FAST-MCD robust covariance / Mahalanobis
+  distance (higher score = more anomalous).
 
 All expose the same interface: ``fit``, ``score_samples(X)`` returning
 continuous anomaly scores, and ``fit_predict(X, contamination=...)``
@@ -826,6 +828,233 @@ class OneClassSVM:
         if not np.isfinite(K).all():
             raise ValueError("kernel matrix is not finite; check gamma, degree and coef0")
         self.scores_ = self._rho - K @ self._alpha
+        return self.scores_
+
+    def predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
+        return _flags_from_contamination(self.score_samples(X), contamination)
+
+    def fit_predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
+        return self.fit(X).predict(X, contamination=contamination)
+
+
+
+def _mcd_h_support(n: int, n_features: int, support_fraction: Optional[float]) -> int:
+    """Subset size ``h`` for the Minimum Covariance Determinant."""
+    n = int(n)
+    p = int(n_features)
+    if n < p + 1:
+        raise ValueError(
+            f"EllipticEnvelope needs at least n_features+1={p + 1} samples, got {n}"
+        )
+    h_min = (n + p + 1) // 2
+    if support_fraction is None:
+        return min(n, max(h_min, p + 1))
+    frac = float(support_fraction)
+    if not 0.5 <= frac <= 1.0:
+        raise ValueError("support_fraction must be in [0.5, 1.0]")
+    h = int(round(frac * n))
+    return min(n, max(h_min, h, p + 1))
+
+
+def _mcd_covariance(X: np.ndarray, idx: np.ndarray, ridge: float) -> tuple[np.ndarray, np.ndarray, float]:
+    """Location, covariance and log-det of the subset ``idx``."""
+    subset = X[idx]
+    mean = subset.mean(axis=0)
+    centered = subset - mean
+    n_h = max(len(idx), 1)
+    cov = (centered.T @ centered) / float(n_h)
+    # Ridge keeps singular subsets invertible when h is barely above p.
+    cov = cov + ridge * np.eye(cov.shape[0])
+    sign, logdet = np.linalg.slogdet(cov)
+    if sign <= 0.0 or not math.isfinite(logdet):
+        return mean, cov, float("inf")
+    return mean, cov, float(logdet)
+
+
+def _mahalanobis2(X: np.ndarray, mean: np.ndarray, precision: np.ndarray) -> np.ndarray:
+    centered = X - mean
+    return np.einsum("ij,jk,ik->i", centered, precision, centered)
+
+
+def _mcd_cstep(
+    X: np.ndarray,
+    idx: np.ndarray,
+    h: int,
+    ridge: float,
+    max_c_steps: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """Concentrate an initial subset to a local MCD minimum."""
+    best_idx = np.asarray(idx, dtype=np.int64)
+    mean, cov, logdet = _mcd_covariance(X, best_idx, ridge)
+    if not math.isfinite(logdet):
+        return best_idx, mean, cov, logdet
+    for _ in range(max_c_steps):
+        try:
+            precision = np.linalg.inv(cov)
+        except np.linalg.LinAlgError:
+            return best_idx, mean, cov, float("inf")
+        d2 = _mahalanobis2(X, mean, precision)
+        new_idx = np.argpartition(d2, h - 1)[:h]
+        new_idx.sort()
+        if new_idx.size == best_idx.size and np.array_equal(new_idx, best_idx):
+            break
+        mean, cov, logdet = _mcd_covariance(X, new_idx, ridge)
+        best_idx = new_idx
+        if not math.isfinite(logdet):
+            break
+    return best_idx, mean, cov, logdet
+
+
+def _fast_mcd(
+    X: np.ndarray,
+    h: int,
+    n_trials: int,
+    seed: Optional[int],
+    ridge: float,
+    max_c_steps: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Rousseeuw & Van Driessen FAST-MCD (simplified, exact C-steps).
+
+    Draws ``n_trials`` raw subsets of size ``n_features + 1``, expands each
+    to the ``h`` nearest points under the subset covariance, runs C-steps,
+    and keeps the location / covariance with the smallest determinant.
+    """
+    n, p = X.shape
+    rng = np.random.default_rng(seed)
+    best_logdet = float("inf")
+    best_mean = X.mean(axis=0)
+    best_cov = np.cov(X.T) + ridge * np.eye(p)
+    if best_cov.ndim == 0:
+        best_cov = np.array([[float(best_cov)]])
+
+    raw_size = min(n, p + 1)
+    for _ in range(max(1, int(n_trials))):
+        start = rng.choice(n, size=raw_size, replace=False)
+        mean0, cov0, logdet0 = _mcd_covariance(X, start, ridge)
+        if not math.isfinite(logdet0):
+            continue
+        try:
+            precision0 = np.linalg.inv(cov0)
+        except np.linalg.LinAlgError:
+            continue
+        d2 = _mahalanobis2(X, mean0, precision0)
+        seed_idx = np.argpartition(d2, h - 1)[:h]
+        idx, mean, cov, logdet = _mcd_cstep(X, seed_idx, h, ridge, max_c_steps)
+        if logdet < best_logdet:
+            best_logdet = logdet
+            best_mean = mean
+            best_cov = cov
+    return best_mean, best_cov
+
+
+class EllipticEnvelope:
+    """Robust Gaussian envelope via the FAST Minimum Covariance Determinant.
+
+    ``fit`` estimates a high-breakdown location and covariance with the
+    Rousseeuw & Van Driessen FAST-MCD concentration steps. The anomaly score
+    of a row is its Mahalanobis distance under that fit (square root of the
+    quadratic form), so points far from the robust centre score higher.
+
+    ``support_fraction`` controls the MCD subset size ``h``. The default
+    ``None`` uses the classic ``(n + n_features + 1) // 2`` breakdown point.
+    ``assume_centered`` skips location estimation and forces the mean to 0.
+
+    The contamination argument on ``predict`` / ``fit_predict`` flags the
+    top fraction of Mahalanobis scores, matching the other detectors.
+    """
+
+    def __init__(
+        self,
+        *,
+        support_fraction: Optional[float] = None,
+        assume_centered: bool = False,
+        n_trials: int = 50,
+        max_c_steps: int = 30,
+        ridge: float = 1e-6,
+        seed: Optional[int] = None,
+    ) -> None:
+        if support_fraction is not None:
+            support_fraction = float(support_fraction)
+            if not 0.5 <= support_fraction <= 1.0:
+                raise ValueError("support_fraction must be in [0.5, 1.0]")
+        n_trials = int(n_trials)
+        if n_trials < 1:
+            raise ValueError("n_trials must be at least 1")
+        max_c_steps = int(max_c_steps)
+        if max_c_steps < 1:
+            raise ValueError("max_c_steps must be at least 1")
+        ridge = float(ridge)
+        if not math.isfinite(ridge) or ridge < 0.0:
+            raise ValueError("ridge must be a non-negative finite number")
+        self.support_fraction = support_fraction
+        self.assume_centered = bool(assume_centered)
+        self.n_trials = n_trials
+        self.max_c_steps = max_c_steps
+        self.ridge = ridge
+        self.seed = seed
+        self.scores_: Optional[np.ndarray] = None
+        self.location_: Optional[np.ndarray] = None
+        self.covariance_: Optional[np.ndarray] = None
+        self.precision_: Optional[np.ndarray] = None
+        self.support_: Optional[np.ndarray] = None
+        self._n_features: Optional[int] = None
+
+    def fit(self, X: np.ndarray) -> "EllipticEnvelope":
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array of shape (n_samples, n_features)")
+        n, p = X.shape
+        if n < 1:
+            raise ValueError("EllipticEnvelope needs at least one sample")
+        self._n_features = p
+        if self.assume_centered:
+            mean = np.zeros(p, dtype=float)
+            centered = X
+            cov = (centered.T @ centered) / float(max(n, 1)) + self.ridge * np.eye(p)
+            support = np.ones(n, dtype=bool)
+        else:
+            h = _mcd_h_support(n, p, self.support_fraction)
+            mean, cov = _fast_mcd(
+                X, h=h, n_trials=self.n_trials, seed=self.seed,
+                ridge=self.ridge, max_c_steps=self.max_c_steps,
+            )
+            try:
+                precision = np.linalg.inv(cov)
+            except np.linalg.LinAlgError as exc:
+                raise ValueError("MCD covariance is singular; increase ridge") from exc
+            d2 = _mahalanobis2(X, mean, precision)
+            support_idx = np.argpartition(d2, h - 1)[:h]
+            support = np.zeros(n, dtype=bool)
+            support[support_idx] = True
+            # One final recompute on the concentrated subset
+            mean, cov, _ = _mcd_covariance(X, support_idx, self.ridge)
+
+        try:
+            precision = np.linalg.inv(cov)
+        except np.linalg.LinAlgError as exc:
+            raise ValueError("MCD covariance is singular; increase ridge") from exc
+        self.location_ = np.asarray(mean, dtype=float)
+        self.covariance_ = np.asarray(cov, dtype=float)
+        self.precision_ = np.asarray(precision, dtype=float)
+        self.support_ = support if not self.assume_centered else np.ones(n, dtype=bool)
+        return self
+
+    def score_samples(self, X: np.ndarray) -> np.ndarray:
+        if self.location_ is None or self.precision_ is None:
+            raise ValueError("EllipticEnvelope must be fitted before scoring")
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array of shape (n_samples, n_features)")
+        if X.shape[1] != self._n_features:
+            raise ValueError(
+                f"X has {X.shape[1]} features, but EllipticEnvelope was fitted on {self._n_features}"
+            )
+        n = len(X)
+        if n == 0:
+            self.scores_ = np.empty(0)
+            return self.scores_
+        d2 = _mahalanobis2(X, self.location_, self.precision_)
+        self.scores_ = np.sqrt(np.maximum(d2, 0.0))
         return self.scores_
 
     def predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:

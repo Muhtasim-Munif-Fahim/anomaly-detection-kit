@@ -2,9 +2,9 @@
 
 A small, dependency-light toolkit for **unsupervised anomaly / outlier
 detection** in tabular data and time series. It ships classical statistical
-baselines (z-score, median/MAD, IQR fences, generalized ESD) and six
+baselines (z-score, median/MAD, IQR fences, generalized ESD) and seven
 self-contained models (isolation forest, local outlier factor, k-nearest
-neighbours, COPOD, HBOS, one-class SVM), plus a seeded synthetic-data generator,
+neighbours, COPOD, HBOS, one-class SVM, EllipticEnvelope / FAST-MCD), plus a seeded synthetic-data generator,
 evaluation metrics, and a markdown report renderer — all built on
 **numpy only** (no scipy, no sklearn).
 
@@ -25,8 +25,9 @@ readable and easy to extend.
   distance, or the mean of the k distances), COPOD (copula-based outlier
   detection from empirical left/right tail CDFs), HBOS
   (histogram-based outlier score from independent univariate histograms),
-  and a one-class SVM (Schölkopf dual, SMO) whose anomaly score is the
-  negative decision function.
+  a one-class SVM (Schölkopf dual, SMO) whose anomaly score is the
+  negative decision function, and an EllipticEnvelope whose score is the
+  Mahalanobis distance under a FAST-MCD robust covariance estimate.
 - **Evaluation** — precision / recall / F1, rank-based ROC-AUC, threshold
   sweep with best-F1 selection, and a comparison table across detectors.
 - **Reports** — markdown renderer with per-detector score summaries, top
@@ -48,7 +49,7 @@ pip install -e .        # optional, exposes the `anomaly-detect` command
 
 ```python
 from anomaly_detection.generators import make_tabular
-from anomaly_detection.models import COPOD, HBOS, IsolationForest, KNN, OneClassSVM
+from anomaly_detection.models import COPOD, EllipticEnvelope, HBOS, IsolationForest, KNN, OneClassSVM
 from anomaly_detection.evaluate import compare_detectors
 
 X, y_true = make_tabular(n_samples=600, contamination=0.05, seed=7)
@@ -59,6 +60,7 @@ detectors = {
     "COPOD": COPOD().fit(X).score_samples,
     "HBOS": HBOS().fit(X).score_samples,
     "one-class SVM": OneClassSVM(nu=0.1).fit(X).score_samples,
+    "elliptic envelope": EllipticEnvelope(seed=7).fit(X).score_samples,
 }
 rows = compare_detectors(X, y_true, detectors, contamination=0.05)
 print(rows[0]["f1"], rows[0]["auc"])
