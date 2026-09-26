@@ -23,6 +23,7 @@ from .evaluate import best_f1_threshold, compare_detectors, evaluate_scores, thr
 from .generators import make_tabular
 from .models import (
     COPOD,
+    ECOD,
     HBOS,
     IsolationForest,
     KNN,
@@ -33,7 +34,7 @@ from .models import (
 )
 
 STATISTICAL_ALIASES = {"zscore": "z-score", "mad": "modified z-score", "iqr": "IQR"}
-MODEL_NAMES = ["isolation_forest", "lof", "copod", "hbos", "knn", "ocsvm", "elliptic"]
+MODEL_NAMES = ["isolation_forest", "lof", "copod", "ecod", "hbos", "knn", "ocsvm", "elliptic"]
 DETECTOR_NAMES = MODEL_NAMES + list(STATISTICAL_ALIASES)
 
 
@@ -44,6 +45,8 @@ def _detector_scores(name: str, X: np.ndarray, seed: Optional[int]) -> np.ndarra
         return LocalOutlierFactor().fit(X).score_samples(X)
     if name == "copod":
         return COPOD().fit(X).score_samples(X)
+    if name == "ecod":
+        return ECOD().fit(X).score_samples(X)
     if name == "hbos":
         return HBOS().fit(X).score_samples(X)
     if name == "knn":

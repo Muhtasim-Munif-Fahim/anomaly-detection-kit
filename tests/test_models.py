@@ -429,6 +429,78 @@ class TestCOPOD:
         assert s[3] > s[0]
 
 
+
+class TestECOD:
+    def test_scores_finite_and_nonnegative(self):
+        X, _ = g.make_tabular(300, 4, 3, contamination=0.05, seed=40)
+        s = m.ECOD().fit(X).score_samples(X)
+        assert s.shape == (300,)
+        assert np.all(np.isfinite(s))
+        assert (s >= 0).all()
+
+    def test_outliers_score_higher_than_inliers(self):
+        X, y = g.make_tabular(600, 4, 3, contamination=0.05, outlier_types="shift", seed=41)
+        s = m.ECOD().fit(X).score_samples(X)
+        assert s[y == 1].mean() > s[y == 0].mean()
+
+    def test_recovers_shift_outliers_from_generator(self):
+        X, y = g.make_tabular(600, 4, 3, contamination=0.05, outlier_types="shift", seed=42)
+        flags = m.ECOD().fit(X).predict(X, contamination=0.05)
+        tp = int(((flags == 1) & (y == 1)).sum())
+        assert tp >= int(y.sum()) * 0.8
+
+    def test_predict_flags_exact_contamination(self):
+        X, _ = g.make_tabular(500, 4, 3, contamination=0.05, seed=43)
+        flags = m.ECOD().fit_predict(X, contamination=0.05)
+        assert flags.sum() == 25
+
+    def test_predict_zero_and_full_contamination(self):
+        X, _ = g.make_tabular(200, 4, 3, contamination=0.05, seed=44)
+        ecod = m.ECOD().fit(X)
+        assert ecod.predict(X, contamination=0.0).sum() == 0
+        assert ecod.predict(X, contamination=1.0).sum() == 200
+
+    def test_fit_predict_matches_predict(self):
+        X, _ = g.make_tabular(300, 4, 3, contamination=0.05, seed=45)
+        flags = m.ECOD().fit_predict(X, contamination=0.05)
+        assert np.array_equal(flags, m.ECOD().fit(X).predict(X, contamination=0.05))
+
+    def test_scale_invariant(self):
+        X, _ = g.make_tabular(200, 3, 2, contamination=0.05, seed=46)
+        s1 = m.ECOD().fit(X).score_samples(X)
+        s2 = m.ECOD().fit(X * 100.0).score_samples(X * 100.0)
+        assert np.allclose(s1, s2)
+
+    def test_shift_invariant(self):
+        X, _ = g.make_tabular(200, 3, 2, contamination=0.05, seed=47)
+        s1 = m.ECOD().fit(X).score_samples(X)
+        s2 = m.ECOD().fit(X + 50.0).score_samples(X + 50.0)
+        assert np.allclose(s1, s2)
+
+    def test_deterministic(self):
+        X, _ = g.make_tabular(200, 3, 2, contamination=0.05, seed=48)
+        s1 = m.ECOD().fit(X).score_samples(X)
+        s2 = m.ECOD().fit(X).score_samples(X)
+        assert np.array_equal(s1, s2)
+
+    def test_scoring_before_fit_raises(self):
+        with pytest.raises(ValueError):
+            m.ECOD().score_samples(np.zeros((5, 3)))
+
+    def test_rejects_1d_input(self):
+        with pytest.raises(ValueError):
+            m.ECOD().fit(np.arange(10.0))
+
+    def test_feature_mismatch_raises(self):
+        ecod = m.ECOD().fit(np.zeros((10, 3)))
+        with pytest.raises(ValueError):
+            ecod.score_samples(np.zeros((5, 2)))
+
+    def test_empty_query_returns_empty(self):
+        s = m.ECOD().fit(np.zeros((10, 3))).score_samples(np.empty((0, 3)))
+        assert s.shape == (0,)
+
+
 class TestHBOS:
     def test_scores_finite_and_nonnegative(self):
         X, _ = g.make_tabular(300, 4, 3, contamination=0.05, seed=30)

@@ -19,6 +19,7 @@ from anomaly_detection.evaluate import (
 from anomaly_detection.generators import make_tabular
 from anomaly_detection.models import (
     COPOD,
+    ECOD,
     HBOS,
     IsolationForest,
     KNN,
@@ -45,6 +46,7 @@ def main() -> None:
         ).fit(X).score_samples,
         "local outlier factor": LocalOutlierFactor(n_neighbors=20).fit(X).score_samples,
         "COPOD": COPOD().fit(X).score_samples,
+        "ECOD": ECOD().fit(X).score_samples,
         "HBOS": HBOS().fit(X).score_samples,
         "k-nearest neighbours": KNN(n_neighbors=5).fit(X).score_samples,
         "one-class SVM": OneClassSVM(nu=0.1).fit(X).score_samples,
