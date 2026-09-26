@@ -39,7 +39,7 @@ class TestDetect:
         rc = cli.main(["detect", "--data", str(csv_path), "--contamination", "0.05", "--seed", "1"])
         assert rc == 0
         out = capsys.readouterr().out
-        for name in ("isolation_forest", "lof", "copod", "hbos", "knn", "ocsvm", "elliptic", "zscore", "mad", "iqr"):
+        for name in ("isolation_forest", "lof", "copod", "ecod", "hbos", "knn", "ocsvm", "elliptic", "zscore", "mad", "iqr"):
             assert f"{name}: flagged" in out
 
     def test_prints_indices(self, tmp_path, capsys):
@@ -160,6 +160,7 @@ class TestParser:
             "isolation_forest",
             "lof",
             "copod",
+            "ecod",
             "hbos",
             "knn",
             "ocsvm",

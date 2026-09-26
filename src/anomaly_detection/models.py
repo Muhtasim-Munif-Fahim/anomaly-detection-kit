@@ -1,6 +1,6 @@
 """Model-based anomaly detectors.
 
-Seven dependency-free models:
+Eight dependency-free models:
 
 * :class:`IsolationForest` -- random feature + random split-point trees with
   path-length anomaly scoring (higher score = more anomalous).
@@ -10,6 +10,9 @@ Seven dependency-free models:
   the k distances; higher score = more anomalous).
 * :class:`COPOD` -- copula-based outlier detection from empirical left/right
   tail CDFs and a skewness-corrected tail (higher score = more anomalous).
+* :class:`ECOD` -- empirical CDF outlier detection from univariate left/right
+  tail probabilities and a skewness-corrected auto tail (higher score =
+  more anomalous).
 * :class:`HBOS` -- histogram-based outlier score from independent univariate
   histograms (higher score = more anomalous).
 * :class:`OneClassSVM` -- one-class SVM (Schölkopf et al.) scored by the
@@ -427,6 +430,77 @@ class COPOD:
         if X.shape[1] != self._n_features:
             raise ValueError(
                 f"X has {X.shape[1]} features, but COPOD was fitted on {self._n_features}"
+            )
+        n = len(X)
+        if n == 0:
+            self.scores_ = np.empty(0)
+            return self.scores_
+        U = _ecdf_against(X, self._sorted)
+        V = _ecdf_against(-X, self._sorted_neg)
+        floor = 1.0 / (self._n_train + 1.0)
+        U = np.clip(U, floor, 1.0)
+        V = np.clip(V, floor, 1.0)
+        W = np.where(self._skewness < 0.0, U, V)
+        p_l = -np.log(U).sum(axis=1)
+        p_r = -np.log(V).sum(axis=1)
+        p_s = -np.log(W).sum(axis=1)
+        self.scores_ = np.maximum(np.maximum(p_l, p_r), p_s)
+        return self.scores_
+
+    def predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
+        return _flags_from_contamination(self.score_samples(X), contamination)
+
+    def fit_predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
+        return self.fit(X).predict(X, contamination=contamination)
+
+
+
+
+class ECOD:
+    """Empirical Cumulative Distribution Outlier Detection (Li et al., 2022).
+
+    Parameter-free. Each feature's univariate left-tail CDF and right-tail
+    survival function yield ``-log`` tail scores; the row score is the most
+    extreme of the three aggregates (left, right, and skewness-corrected
+    auto). Unlike COPOD this never builds a multivariate copula — every
+    dimension is scored independently and the logs are summed.
+
+    ``fit`` stores the training columns so ``score_samples`` can score new
+    rows against those ECDFs. Scoring the training matrix itself matches
+    the usual transductive ranking.
+    """
+
+    def __init__(self) -> None:
+        self.scores_: Optional[np.ndarray] = None
+        self._sorted: Optional[np.ndarray] = None
+        self._sorted_neg: Optional[np.ndarray] = None
+        self._n_train = 0
+        self._n_features: Optional[int] = None
+        self._skewness: Optional[np.ndarray] = None
+
+    def fit(self, X: np.ndarray) -> "ECOD":
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array of shape (n_samples, n_features)")
+        n = len(X)
+        if n < 1:
+            raise ValueError("ECOD needs at least one sample")
+        self._n_train = n
+        self._n_features = X.shape[1]
+        self._sorted = np.sort(X, axis=0)
+        self._sorted_neg = np.sort(-X, axis=0)
+        self._skewness = _column_skewness(X)
+        return self
+
+    def score_samples(self, X: np.ndarray) -> np.ndarray:
+        if self._sorted is None or self._sorted_neg is None or self._skewness is None:
+            raise ValueError("ECOD must be fitted before scoring")
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array of shape (n_samples, n_features)")
+        if X.shape[1] != self._n_features:
+            raise ValueError(
+                f"X has {X.shape[1]} features, but ECOD was fitted on {self._n_features}"
             )
         n = len(X)
         if n == 0:
