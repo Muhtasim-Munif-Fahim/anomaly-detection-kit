@@ -28,11 +28,12 @@ from .models import (
     KNN,
     LocalOutlierFactor,
     OneClassSVM,
+    EllipticEnvelope,
     _flags_from_contamination,
 )
 
 STATISTICAL_ALIASES = {"zscore": "z-score", "mad": "modified z-score", "iqr": "IQR"}
-MODEL_NAMES = ["isolation_forest", "lof", "copod", "hbos", "knn", "ocsvm"]
+MODEL_NAMES = ["isolation_forest", "lof", "copod", "hbos", "knn", "ocsvm", "elliptic"]
 DETECTOR_NAMES = MODEL_NAMES + list(STATISTICAL_ALIASES)
 
 
@@ -49,6 +50,8 @@ def _detector_scores(name: str, X: np.ndarray, seed: Optional[int]) -> np.ndarra
         return KNN().fit(X).score_samples(X)
     if name == "ocsvm":
         return OneClassSVM().fit(X).score_samples(X)
+    if name == "elliptic":
+        return EllipticEnvelope(seed=seed).fit(X).score_samples(X)
     return STATISTICAL_SCORERS[STATISTICAL_ALIASES[name]](X)
 
 

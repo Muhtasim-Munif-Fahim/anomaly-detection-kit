@@ -787,7 +787,91 @@ class TestOneClassSVM:
         assert np.array_equal(X, original)
 
 
+
+class TestEllipticEnvelope:
+    def test_scores_shape_and_finite(self):
+        X, _ = g.make_tabular(200, 4, 3, contamination=0.05, seed=91)
+        s = m.EllipticEnvelope(seed=0).fit(X).score_samples(X)
+        assert s.shape == (200,)
+        assert np.all(np.isfinite(s))
+        assert np.all(s >= 0.0)
+
+    def test_flags_obvious_shift_outlier(self):
+        rng = np.random.default_rng(0)
+        X = rng.normal(size=(200, 3))
+        X[0] = [8.0, 8.0, 8.0]
+        flags = m.EllipticEnvelope(seed=1).fit(X).predict(X, contamination=0.05)
+        assert flags[0] == 1
+
+    def test_fit_predict_matches_predict(self):
+        X, _ = g.make_tabular(150, 3, 2, contamination=0.05, seed=92)
+        model = m.EllipticEnvelope(seed=2)
+        f1 = model.fit(X).predict(X, contamination=0.1)
+        f2 = model.fit_predict(X, contamination=0.1)
+        assert np.array_equal(f1, f2)
+
+    def test_deterministic_with_seed(self):
+        X, _ = g.make_tabular(120, 3, 2, contamination=0.05, seed=93)
+        s1 = m.EllipticEnvelope(seed=5).fit(X).score_samples(X)
+        s2 = m.EllipticEnvelope(seed=5).fit(X).score_samples(X)
+        assert np.allclose(s1, s2)
+
+    def test_assume_centered(self):
+        rng = np.random.default_rng(3)
+        X = rng.normal(size=(100, 2))
+        s = m.EllipticEnvelope(assume_centered=True).fit(X).score_samples(X)
+        assert s.shape == (100,)
+        assert np.all(np.isfinite(s))
+
+    def test_support_fraction(self):
+        X, _ = g.make_tabular(100, 3, 2, contamination=0.05, seed=94)
+        model = m.EllipticEnvelope(support_fraction=0.8, seed=0).fit(X)
+        assert model.support_ is not None
+        assert int(model.support_.sum()) >= 80
+
+    def test_location_near_inlier_mean(self):
+        rng = np.random.default_rng(4)
+        X = rng.normal(loc=2.0, scale=0.5, size=(200, 2))
+        X[0] = [20.0, 20.0]
+        loc = m.EllipticEnvelope(seed=0).fit(X).location_
+        assert np.allclose(loc, [2.0, 2.0], atol=0.3)
+
+    def test_score_unseen_rows(self):
+        X, _ = g.make_tabular(80, 3, 2, contamination=0.0, seed=95)
+        model = m.EllipticEnvelope(seed=0).fit(X)
+        s = model.score_samples(X[:5] + 5.0)
+        assert s.shape == (5,)
+        assert s.min() > model.score_samples(X).mean()
+
+    def test_invalid_support_fraction_raises(self):
+        with pytest.raises(ValueError):
+            m.EllipticEnvelope(support_fraction=0.4)
+        with pytest.raises(ValueError):
+            m.EllipticEnvelope(support_fraction=1.1)
+
+    def test_too_few_samples_raises(self):
+        with pytest.raises(ValueError):
+            m.EllipticEnvelope(seed=0).fit(np.zeros((2, 3)))
+
+    def test_unfitted_score_raises(self):
+        with pytest.raises(ValueError):
+            m.EllipticEnvelope().score_samples(np.zeros((5, 2)))
+
+    def test_feature_mismatch_raises(self):
+        X, _ = g.make_tabular(40, 3, 2, contamination=0.0, seed=96)
+        model = m.EllipticEnvelope(seed=0).fit(X)
+        with pytest.raises(ValueError):
+            model.score_samples(np.zeros((5, 4)))
+
+    def test_fit_does_not_mutate_input(self):
+        X, _ = g.make_tabular(40, 3, 2, contamination=0.0, seed=97)
+        original = X.copy()
+        m.EllipticEnvelope(seed=0).fit(X).score_samples(X)
+        assert np.array_equal(X, original)
+
+
 class TestFlagsHelper:
+
     def test_boundary_behaviour(self):
         scores = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
         flags = m._flags_from_contamination(scores, 0.2)
