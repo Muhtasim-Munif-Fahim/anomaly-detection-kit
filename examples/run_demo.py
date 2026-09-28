@@ -25,6 +25,8 @@ from anomaly_detection.models import (
     KNN,
     LocalOutlierFactor,
     OneClassSVM,
+    EllipticEnvelope,
+    CBLOF,
     _flags_from_contamination,
 )
 
@@ -50,6 +52,8 @@ def main() -> None:
         "HBOS": HBOS().fit(X).score_samples,
         "k-nearest neighbours": KNN(n_neighbors=5).fit(X).score_samples,
         "one-class SVM": OneClassSVM(nu=0.1).fit(X).score_samples,
+        "elliptic envelope": EllipticEnvelope(seed=SEED).fit(X).score_samples,
+        "CBLOF": CBLOF(n_clusters=8, seed=SEED).fit(X).score_samples,
     }
     detectors.update(STATISTICAL_SCORERS)
 
