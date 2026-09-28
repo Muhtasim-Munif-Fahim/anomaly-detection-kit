@@ -1,6 +1,6 @@
 """Model-based anomaly detectors.
 
-Eight dependency-free models:
+Nine dependency-free models:
 
 * :class:`IsolationForest` -- random feature + random split-point trees with
   path-length anomaly scoring (higher score = more anomalous).
@@ -19,6 +19,9 @@ Eight dependency-free models:
   negative decision function (higher score = more anomalous).
 * :class:`EllipticEnvelope` -- FAST-MCD robust covariance / Mahalanobis
   distance (higher score = more anomalous).
+* :class:`CBLOF` -- cluster-based local outlier factor: k-means clusters are
+  labelled large/small, then points score by distance to their own large
+  centre or to the nearest large centre (higher score = more anomalous).
 
 All expose the same interface: ``fit``, ``score_samples(X)`` returning
 continuous anomaly scores, and ``fit_predict(X, contamination=...)``
@@ -1129,6 +1132,245 @@ class EllipticEnvelope:
             return self.scores_
         d2 = _mahalanobis2(X, self.location_, self.precision_)
         self.scores_ = np.sqrt(np.maximum(d2, 0.0))
+        return self.scores_
+
+    def predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
+        return _flags_from_contamination(self.score_samples(X), contamination)
+
+    def fit_predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
+        return self.fit(X).predict(X, contamination=contamination)
+
+
+def _kmeans(
+    X: np.ndarray,
+    n_clusters: int,
+    n_init: int,
+    max_iter: int,
+    tol: float,
+    seed: Optional[int],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Lloyd k-means with multiple random reinits; returns (labels, centers)."""
+    n, p = X.shape
+    rng = np.random.default_rng(seed)
+    best_inertia = math.inf
+    best_labels = np.zeros(n, dtype=int)
+    best_centers = np.zeros((n_clusters, p), dtype=float)
+
+    for _ in range(n_init):
+        # Forgy init: sample distinct rows when possible.
+        if n >= n_clusters:
+            idx = rng.choice(n, size=n_clusters, replace=False)
+        else:
+            idx = rng.integers(0, n, size=n_clusters)
+        centers = X[idx].copy()
+        labels = np.zeros(n, dtype=int)
+        for _it in range(max_iter):
+            # Assign
+            # ||x - c||^2 = ||x||^2 + ||c||^2 - 2 x·c
+            x2 = np.sum(X * X, axis=1, keepdims=True)
+            c2 = np.sum(centers * centers, axis=1)
+            d2 = np.maximum(x2 + c2 - 2.0 * (X @ centers.T), 0.0)
+            new_labels = np.argmin(d2, axis=1).astype(int)
+            # Update
+            new_centers = centers.copy()
+            for k in range(n_clusters):
+                members = X[new_labels == k]
+                if len(members) == 0:
+                    # Re-seed empty cluster on a random point.
+                    new_centers[k] = X[int(rng.integers(0, n))]
+                else:
+                    new_centers[k] = members.mean(axis=0)
+            shift = float(np.linalg.norm(new_centers - centers))
+            centers = new_centers
+            labels = new_labels
+            if shift <= tol:
+                break
+        inertia = float(np.sum((X - centers[labels]) ** 2))
+        if inertia < best_inertia:
+            best_inertia = inertia
+            best_labels = labels.copy()
+            best_centers = centers.copy()
+    return best_labels, best_centers
+
+
+def _cblof_large_mask(
+    sizes: np.ndarray,
+    alpha: float,
+    beta: float,
+) -> np.ndarray:
+    """Decide which clusters are large given sorted-by-size heuristics.
+
+    Clusters are processed from largest to smallest. A cut is placed at the
+    first index where either (a) the cumulative size of the larger clusters
+    already covers ``alpha`` of the data, or (b) the size ratio between the
+    previous and current cluster exceeds ``beta``. Everything before the cut
+    is large; the rest is small. At least one cluster is always large.
+    """
+    n_clusters = sizes.size
+    order = np.argsort(sizes)[::-1]
+    sorted_sizes = sizes[order]
+    total = float(sorted_sizes.sum())
+    if total <= 0.0:
+        mask = np.zeros(n_clusters, dtype=bool)
+        mask[order[0]] = True
+        return mask
+
+    cut = n_clusters  # all large by default
+    cum = 0.0
+    for i in range(n_clusters):
+        cum += float(sorted_sizes[i])
+        # After including cluster i as large, check whether we should stop.
+        # Cut after i (so clusters 0..i inclusive stay large) when the alpha
+        # mass is reached, or when the next cluster (if any) is beta-smaller.
+        alpha_hit = cum >= alpha * total
+        beta_hit = False
+        if i + 1 < n_clusters and sorted_sizes[i + 1] > 0:
+            beta_hit = (sorted_sizes[i] / sorted_sizes[i + 1]) >= beta
+        if alpha_hit or beta_hit:
+            cut = i + 1
+            break
+    cut = max(1, min(cut, n_clusters))
+    large = np.zeros(n_clusters, dtype=bool)
+    large[order[:cut]] = True
+    return large
+
+
+class CBLOF:
+    """Cluster-Based Local Outlier Factor (He, Deng & Xu, 2003).
+
+    ``fit`` runs Lloyd k-means, labels clusters as large or small with the
+    alpha / beta heuristics used by PyOD, then scores each row by its
+    Euclidean distance to a large-cluster centre:
+
+    * points assigned to a **large** cluster use the distance to their own
+      centre;
+    * points assigned to a **small** cluster use the distance to the nearest
+      large centre.
+
+    When ``use_weights`` is true the distance is multiplied by the size of
+    the point's own cluster, so outliers sitting in populous regions score
+    higher. The contamination argument on ``predict`` / ``fit_predict``
+    flags the top fraction of scores, matching the other detectors.
+    """
+
+    def __init__(
+        self,
+        n_clusters: int = 8,
+        alpha: float = 0.9,
+        beta: float = 5.0,
+        use_weights: bool = True,
+        n_init: int = 10,
+        max_iter: int = 100,
+        tol: float = 1e-4,
+        seed: Optional[int] = None,
+    ) -> None:
+        n_clusters = int(n_clusters)
+        if n_clusters < 2:
+            raise ValueError("n_clusters must be at least 2")
+        alpha = float(alpha)
+        if not 0.0 < alpha <= 1.0:
+            raise ValueError("alpha must be in (0, 1]")
+        beta = float(beta)
+        if not math.isfinite(beta) or beta < 1.0:
+            raise ValueError("beta must be a finite number >= 1")
+        n_init = int(n_init)
+        if n_init < 1:
+            raise ValueError("n_init must be at least 1")
+        max_iter = int(max_iter)
+        if max_iter < 1:
+            raise ValueError("max_iter must be at least 1")
+        tol = float(tol)
+        if not math.isfinite(tol) or tol < 0.0:
+            raise ValueError("tol must be a non-negative finite number")
+        self.n_clusters = n_clusters
+        self.alpha = alpha
+        self.beta = beta
+        self.use_weights = bool(use_weights)
+        self.n_init = n_init
+        self.max_iter = max_iter
+        self.tol = tol
+        self.seed = seed
+        self.scores_: Optional[np.ndarray] = None
+        self.labels_: Optional[np.ndarray] = None
+        self.cluster_centers_: Optional[np.ndarray] = None
+        self.cluster_sizes_: Optional[np.ndarray] = None
+        self.large_cluster_labels_: Optional[np.ndarray] = None
+        self._n_features: Optional[int] = None
+
+    def fit(self, X: np.ndarray) -> "CBLOF":
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array of shape (n_samples, n_features)")
+        n, p = X.shape
+        if n < self.n_clusters:
+            raise ValueError(
+                f"CBLOF needs at least n_clusters={self.n_clusters} samples, got {n}"
+            )
+        if not np.all(np.isfinite(X)):
+            raise ValueError("X must contain only finite values")
+        self._n_features = p
+        labels, centers = _kmeans(
+            X,
+            n_clusters=self.n_clusters,
+            n_init=self.n_init,
+            max_iter=self.max_iter,
+            tol=self.tol,
+            seed=self.seed,
+        )
+        sizes = np.bincount(labels, minlength=self.n_clusters).astype(float)
+        large_mask = _cblof_large_mask(sizes, self.alpha, self.beta)
+        if not bool(large_mask.any()):
+            large_mask[int(np.argmax(sizes))] = True
+        self.labels_ = labels
+        self.cluster_centers_ = centers
+        self.cluster_sizes_ = sizes
+        self.large_cluster_labels_ = np.flatnonzero(large_mask)
+        return self
+
+    def score_samples(self, X: np.ndarray) -> np.ndarray:
+        if (
+            self.cluster_centers_ is None
+            or self.large_cluster_labels_ is None
+            or self.cluster_sizes_ is None
+            or self.labels_ is None
+        ):
+            raise ValueError("CBLOF must be fitted before scoring")
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array of shape (n_samples, n_features)")
+        if X.shape[1] != self._n_features:
+            raise ValueError(
+                f"X has {X.shape[1]} features, but CBLOF was fitted on {self._n_features}"
+            )
+        n = len(X)
+        if n == 0:
+            self.scores_ = np.empty(0)
+            return self.scores_
+
+        centers = self.cluster_centers_
+        large_idx = self.large_cluster_labels_
+        large_centers = centers[large_idx]
+        # Assign query rows to nearest of the fitted centres.
+        x2 = np.sum(X * X, axis=1, keepdims=True)
+        c2 = np.sum(centers * centers, axis=1)
+        d2_all = np.maximum(x2 + c2 - 2.0 * (X @ centers.T), 0.0)
+        assign = np.argmin(d2_all, axis=1)
+        # Distance to own centre and to nearest large centre.
+        own = np.sqrt(d2_all[np.arange(n), assign])
+        lc2 = np.sum(large_centers * large_centers, axis=1)
+        d2_large = np.maximum(x2 + lc2 - 2.0 * (X @ large_centers.T), 0.0)
+        nearest_large = np.sqrt(np.min(d2_large, axis=1))
+
+        large_set = set(int(i) for i in large_idx)
+        scores = np.empty(n, dtype=float)
+        for i in range(n):
+            if int(assign[i]) in large_set:
+                scores[i] = own[i]
+            else:
+                scores[i] = nearest_large[i]
+            if self.use_weights:
+                scores[i] *= float(self.cluster_sizes_[int(assign[i])])
+        self.scores_ = scores
         return self.scores_
 
     def predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:

@@ -942,6 +942,102 @@ class TestEllipticEnvelope:
         assert np.array_equal(X, original)
 
 
+
+class TestCBLOF:
+    def test_scores_shape_and_finite(self):
+        X, _ = g.make_tabular(200, 4, 3, contamination=0.05, seed=101)
+        s = m.CBLOF(n_clusters=5, seed=0).fit(X).score_samples(X)
+        assert s.shape == (200,)
+        assert np.all(np.isfinite(s))
+        assert np.all(s >= 0.0)
+
+    def test_flags_obvious_shift_outlier(self):
+        rng = np.random.default_rng(0)
+        # Two tight clusters plus one far outlier. Disable size weighting so the
+        # raw distance-to-large-centre score dominates the ranking.
+        a = rng.normal(loc=-3.0, scale=0.2, size=(80, 2))
+        b = rng.normal(loc=3.0, scale=0.2, size=(80, 2))
+        outlier = np.array([[20.0, 20.0]])
+        X = np.vstack([a, b, outlier])
+        flags = m.CBLOF(
+            n_clusters=4, use_weights=False, seed=1
+        ).fit(X).predict(X, contamination=0.02)
+        assert flags[-1] == 1
+
+    def test_outliers_score_higher_than_inliers(self):
+        X, y = g.make_tabular(400, 4, 3, contamination=0.05, outlier_types="shift", seed=102)
+        s = m.CBLOF(n_clusters=6, seed=2).fit(X).score_samples(X)
+        assert s[y == 1].mean() > s[y == 0].mean()
+
+    def test_fit_predict_matches_predict(self):
+        X, _ = g.make_tabular(150, 3, 2, contamination=0.05, seed=103)
+        model = m.CBLOF(n_clusters=4, seed=3)
+        f1 = model.fit(X).predict(X, contamination=0.1)
+        f2 = model.fit_predict(X, contamination=0.1)
+        assert np.array_equal(f1, f2)
+
+    def test_deterministic_with_seed(self):
+        X, _ = g.make_tabular(120, 3, 2, contamination=0.05, seed=104)
+        s1 = m.CBLOF(n_clusters=4, seed=5).fit(X).score_samples(X)
+        s2 = m.CBLOF(n_clusters=4, seed=5).fit(X).score_samples(X)
+        assert np.allclose(s1, s2)
+
+    def test_large_cluster_labels_nonempty(self):
+        X, _ = g.make_tabular(100, 3, 2, contamination=0.05, seed=105)
+        model = m.CBLOF(n_clusters=5, seed=0).fit(X)
+        assert model.large_cluster_labels_ is not None
+        assert len(model.large_cluster_labels_) >= 1
+        assert model.cluster_sizes_ is not None
+        assert model.cluster_sizes_.sum() == 100
+
+    def test_use_weights_false(self):
+        X, _ = g.make_tabular(80, 3, 2, contamination=0.0, seed=106)
+        s = m.CBLOF(n_clusters=4, use_weights=False, seed=0).fit(X).score_samples(X)
+        assert s.shape == (80,)
+        assert np.all(np.isfinite(s))
+
+    def test_score_unseen_rows(self):
+        X, _ = g.make_tabular(80, 3, 2, contamination=0.0, seed=107)
+        model = m.CBLOF(n_clusters=4, seed=0).fit(X)
+        s = model.score_samples(X[:5] + 8.0)
+        assert s.shape == (5,)
+        assert s.min() > model.score_samples(X).mean()
+
+    def test_invalid_n_clusters_raises(self):
+        with pytest.raises(ValueError):
+            m.CBLOF(n_clusters=1)
+
+    def test_invalid_alpha_raises(self):
+        with pytest.raises(ValueError):
+            m.CBLOF(alpha=0.0)
+        with pytest.raises(ValueError):
+            m.CBLOF(alpha=1.5)
+
+    def test_invalid_beta_raises(self):
+        with pytest.raises(ValueError):
+            m.CBLOF(beta=0.5)
+
+    def test_too_few_samples_raises(self):
+        with pytest.raises(ValueError):
+            m.CBLOF(n_clusters=5, seed=0).fit(np.zeros((3, 2)))
+
+    def test_unfitted_score_raises(self):
+        with pytest.raises(ValueError):
+            m.CBLOF().score_samples(np.zeros((5, 2)))
+
+    def test_feature_mismatch_raises(self):
+        X, _ = g.make_tabular(40, 3, 2, contamination=0.0, seed=108)
+        model = m.CBLOF(n_clusters=3, seed=0).fit(X)
+        with pytest.raises(ValueError):
+            model.score_samples(np.zeros((5, 4)))
+
+    def test_fit_does_not_mutate_input(self):
+        X, _ = g.make_tabular(40, 3, 2, contamination=0.0, seed=109)
+        original = X.copy()
+        m.CBLOF(n_clusters=3, seed=0).fit(X).score_samples(X)
+        assert np.array_equal(X, original)
+
+
 class TestFlagsHelper:
 
     def test_boundary_behaviour(self):

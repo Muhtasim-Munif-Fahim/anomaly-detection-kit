@@ -2,9 +2,10 @@
 
 A small, dependency-light toolkit for **unsupervised anomaly / outlier
 detection** in tabular data and time series. It ships classical statistical
-baselines (z-score, median/MAD, IQR fences, generalized ESD) and seven
+baselines (z-score, median/MAD, IQR fences, generalized ESD) and nine
 self-contained models (isolation forest, local outlier factor, k-nearest
-neighbours, COPOD, ECOD, HBOS, one-class SVM, EllipticEnvelope / FAST-MCD), plus a seeded synthetic-data generator,
+neighbours, COPOD, ECOD, HBOS, one-class SVM, EllipticEnvelope / FAST-MCD,
+CBLOF), plus a seeded synthetic-data generator,
 evaluation metrics, and a markdown report renderer — all built on
 **numpy only** (no scipy, no sklearn).
 
@@ -27,8 +28,10 @@ readable and easy to extend.
   CDF outlier detection with left/right/auto tails), HBOS
   (histogram-based outlier score from independent univariate histograms),
   a one-class SVM (Schölkopf dual, SMO) whose anomaly score is the
-  negative decision function, and an EllipticEnvelope whose score is the
-  Mahalanobis distance under a FAST-MCD robust covariance estimate.
+  negative decision function, an EllipticEnvelope whose score is the
+  Mahalanobis distance under a FAST-MCD robust covariance estimate, and
+  CBLOF (cluster-based local outlier factor via k-means large/small
+  clusters and distance-to-large-centre scoring).
 - **Evaluation** — precision / recall / F1, rank-based ROC-AUC, threshold
   sweep with best-F1 selection, and a comparison table across detectors.
 - **Reports** — markdown renderer with per-detector score summaries, top
@@ -50,7 +53,7 @@ pip install -e .        # optional, exposes the `anomaly-detect` command
 
 ```python
 from anomaly_detection.generators import make_tabular
-from anomaly_detection.models import COPOD, ECOD, EllipticEnvelope, HBOS, IsolationForest, KNN, OneClassSVM
+from anomaly_detection.models import CBLOF, COPOD, ECOD, EllipticEnvelope, HBOS, IsolationForest, KNN, OneClassSVM
 from anomaly_detection.evaluate import compare_detectors
 
 X, y_true = make_tabular(n_samples=600, contamination=0.05, seed=7)
@@ -63,6 +66,7 @@ detectors = {
     "HBOS": HBOS().fit(X).score_samples,
     "one-class SVM": OneClassSVM(nu=0.1).fit(X).score_samples,
     "elliptic envelope": EllipticEnvelope(seed=7).fit(X).score_samples,
+    "CBLOF": CBLOF(n_clusters=8, seed=7).fit(X).score_samples,
 }
 rows = compare_detectors(X, y_true, detectors, contamination=0.05)
 print(rows[0]["f1"], rows[0]["auc"])
@@ -127,6 +131,8 @@ Or without installing: `python -m anomaly_detection <command> ...`.
 | ECOD              | model         | higher = more anomalous                | none (parameter-free)       |
 | HBOS              | model         | higher = more anomalous                | `n_bins`, `alpha`, `tol`    |
 | One-class SVM     | model         | higher = more anomalous                | `nu`, `kernel`, `gamma`     |
+| EllipticEnvelope  | model         | higher = more anomalous                | `support_fraction`, `seed`  |
+| CBLOF             | model         | higher = more anomalous                | `n_clusters`, `alpha`, `beta`|
 | z-score           | statistical   | max abs z per row                       | `threshold` (default 3.0)   |
 | Modified z-score  | statistical   | median/MAD robust z                    | `threshold` (default 3.5)   |
 | IQR fences        | statistical   | distance beyond fence / IQR            | `k` (default 1.5)           |
@@ -138,7 +144,7 @@ Or without installing: `python -m anomaly_detection <command> ...`.
 src/anomaly_detection/
 ├── generators.py   # seeded synthetic data (tabular + time series)
 ├── classic.py      # statistical baselines incl. GESD
-├── models.py       # isolation forest, LOF, kNN, COPOD, ECOD, HBOS, one-class SVM
+├── models.py       # isolation forest, LOF, kNN, COPOD, ECOD, HBOS, one-class SVM, EllipticEnvelope, CBLOF
 ├── evaluate.py     # metrics, threshold sweep, comparison
 ├── report.py       # markdown rendering
 └── cli.py          # command line interface
@@ -155,6 +161,7 @@ tests/
 - Isolation forest and LOF are stochastic; pass a `seed` for reproducible
   runs. COPOD / ECOD (empirical CDFs), HBOS (histograms), kNN (pairwise
   distances) and one-class SVM (SMO on a fixed kernel) are deterministic.
+  CBLOF is stochastic in its k-means init; pass a `seed` for reproducible runs.
 - Labels come from the synthetic generator, so the metrics measure recovery
   of known-injected outliers, not performance on unlabelled real-world data.
 - The generalized ESD test assumes a roughly normal baseline and can miss
