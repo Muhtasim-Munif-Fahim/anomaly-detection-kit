@@ -1038,6 +1038,66 @@ class TestCBLOF:
         assert np.array_equal(X, original)
 
 
+
+
+class TestLODA:
+    def test_scores_shape_and_finite(self):
+        X, _ = g.make_tabular(200, 4, 3, contamination=0.05, seed=201)
+        s = m.LODA(n_bins=10, n_random_cuts=50, seed=0).fit(X).score_samples(X)
+        assert s.shape == (200,)
+        assert np.all(np.isfinite(s))
+
+    def test_contamination_predict(self):
+        X, _ = g.make_tabular(150, 3, 2, contamination=0.05, seed=202)
+        flags = m.LODA(n_bins=8, n_random_cuts=40, seed=1).fit(X).predict(
+            X, contamination=0.1
+        )
+        assert flags.shape == (150,)
+        assert set(np.unique(flags)).issubset({0, 1})
+        assert int(flags.sum()) == 15  # 10% of 150
+
+    def test_seed_reproducibility(self):
+        X, _ = g.make_tabular(120, 3, 2, contamination=0.05, seed=203)
+        s1 = m.LODA(n_bins=10, n_random_cuts=30, seed=5).fit(X).score_samples(X)
+        s2 = m.LODA(n_bins=10, n_random_cuts=30, seed=5).fit(X).score_samples(X)
+        assert np.allclose(s1, s2)
+
+    def test_different_seeds_differ(self):
+        X, _ = g.make_tabular(120, 3, 2, contamination=0.05, seed=204)
+        s1 = m.LODA(n_bins=10, n_random_cuts=30, seed=1).fit(X).score_samples(X)
+        s2 = m.LODA(n_bins=10, n_random_cuts=30, seed=2).fit(X).score_samples(X)
+        assert not np.allclose(s1, s2)
+
+    def test_outliers_score_higher(self):
+        X, y = g.make_tabular(
+            400, 4, 3, contamination=0.05, outlier_types="shift", seed=205
+        )
+        s = m.LODA(n_bins=10, n_random_cuts=80, seed=3).fit(X).score_samples(X)
+        assert s[y == 1].mean() > s[y == 0].mean()
+
+    def test_fit_predict_matches_predict(self):
+        X, _ = g.make_tabular(100, 3, 2, contamination=0.05, seed=206)
+        model = m.LODA(n_bins=8, n_random_cuts=20, seed=4)
+        f1 = model.fit(X).predict(X, contamination=0.1)
+        f2 = model.fit_predict(X, contamination=0.1)
+        assert np.array_equal(f1, f2)
+
+    def test_score_before_fit_raises(self):
+        with pytest.raises(ValueError):
+            m.LODA().score_samples(np.zeros((5, 2)))
+
+    def test_invalid_params_raise(self):
+        with pytest.raises(ValueError):
+            m.LODA(n_bins=1)
+        with pytest.raises(ValueError):
+            m.LODA(n_random_cuts=0)
+
+    def test_feature_mismatch_raises(self):
+        X = np.random.default_rng(0).normal(size=(40, 3))
+        model = m.LODA(n_bins=5, n_random_cuts=10, seed=0).fit(X)
+        with pytest.raises(ValueError):
+            model.score_samples(np.zeros((5, 4)))
+
 class TestFlagsHelper:
 
     def test_boundary_behaviour(self):

@@ -20,6 +20,8 @@ Nine dependency-free models:
 * :class:`EllipticEnvelope` -- FAST-MCD robust covariance / Mahalanobis
   distance (higher score = more anomalous).
 * :class:`CBLOF` -- cluster-based local outlier factor: k-means clusters are
+* :class:`LODA` -- lightweight online detector of anomalies: random
+  1-D projections with histogram density scores (higher = more anomalous).
   labelled large/small, then points score by distance to their own large
   centre or to the nearest large centre (higher score = more anomalous).
 
@@ -1370,6 +1372,133 @@ class CBLOF:
                 scores[i] = nearest_large[i]
             if self.use_weights:
                 scores[i] *= float(self.cluster_sizes_[int(assign[i])])
+        self.scores_ = scores
+        return self.scores_
+
+    def predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
+        return _flags_from_contamination(self.score_samples(X), contamination)
+
+    def fit_predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
+        return self.fit(X).predict(X, contamination=contamination)
+
+
+def _loda_histogram_heights(
+    values: np.ndarray,
+    edges: np.ndarray,
+    dens: np.ndarray,
+    floor: float,
+) -> np.ndarray:
+    """Lookup histogram density for projected values.
+
+    Points outside the training range inherit ``floor`` (rare).
+    """
+    n = values.size
+    n_bins = dens.size
+    heights = np.empty(n, dtype=float)
+    in_range = (values >= edges[0]) & (values <= edges[-1])
+    inds = np.searchsorted(edges, values, side="right") - 1
+    inds = np.clip(inds, 0, n_bins - 1)
+    heights[in_range] = dens[inds[in_range]]
+    heights[~in_range] = floor
+    return heights
+
+
+class LODA:
+    """Lightweight Online Detector of Anomalies (Pevný, 2016).
+
+    Draws ``n_random_cuts`` sparse random 1-D projections of the data, fits
+    an equal-width histogram on each projected axis, and scores a row as the
+    mean of ``-log`` histogram densities across cuts. Sparse bins (and points
+    outside the training range) score high, so higher scores are more
+    anomalous. Pass ``seed`` for reproducible projection draws.
+    """
+
+    def __init__(
+        self,
+        n_bins: int = 10,
+        n_random_cuts: int = 100,
+        seed: Optional[int] = None,
+    ) -> None:
+        n_bins = int(n_bins)
+        if n_bins < 2:
+            raise ValueError("n_bins must be at least 2")
+        n_random_cuts = int(n_random_cuts)
+        if n_random_cuts < 1:
+            raise ValueError("n_random_cuts must be at least 1")
+        self.n_bins = n_bins
+        self.n_random_cuts = n_random_cuts
+        self.seed = seed
+        self.scores_: Optional[np.ndarray] = None
+        self.projections_: Optional[np.ndarray] = None
+        self._hist: Optional[np.ndarray] = None
+        self._edges: Optional[np.ndarray] = None
+        self._n_features: Optional[int] = None
+        self._floor = 1e-12
+
+    def fit(self, X: np.ndarray) -> "LODA":
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array of shape (n_samples, n_features)")
+        n, p = X.shape
+        if n < 1:
+            raise ValueError("LODA needs at least one sample")
+        if p < 1:
+            raise ValueError("LODA needs at least one feature")
+        if not np.all(np.isfinite(X)):
+            raise ValueError("X must contain only finite values")
+        self._n_features = p
+        rng = np.random.default_rng(self.seed)
+        # Sparse random projections (~sqrt(p) nonzero ±1 entries per cut).
+        n_nonzero = max(int(round(p ** 0.5)), 1)
+        n_nonzero = min(n_nonzero, p)
+        projections = np.zeros((self.n_random_cuts, p), dtype=float)
+        for k in range(self.n_random_cuts):
+            idx = rng.choice(p, size=n_nonzero, replace=False)
+            signs = rng.choice(np.array([-1.0, 1.0]), size=n_nonzero)
+            projections[k, idx] = signs
+        self.projections_ = projections
+
+        projected = X @ projections.T  # (n, n_cuts)
+        hist = np.empty((self.n_random_cuts, self.n_bins), dtype=float)
+        edges = np.empty((self.n_random_cuts, self.n_bins + 1), dtype=float)
+        for k in range(self.n_random_cuts):
+            col = projected[:, k]
+            counts, col_edges = np.histogram(col, bins=self.n_bins)
+            # Convert counts to probability densities (sum to 1).
+            total = float(counts.sum())
+            if total > 0.0:
+                dens = counts.astype(float) / total
+            else:
+                dens = np.full(self.n_bins, 1.0 / self.n_bins)
+            dens = np.maximum(dens, self._floor)
+            hist[k] = dens
+            edges[k] = col_edges
+        self._hist = hist
+        self._edges = edges
+        return self
+
+    def score_samples(self, X: np.ndarray) -> np.ndarray:
+        if self.projections_ is None or self._hist is None or self._edges is None:
+            raise ValueError("LODA must be fitted before scoring")
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array of shape (n_samples, n_features)")
+        if X.shape[1] != self._n_features:
+            raise ValueError(
+                f"X has {X.shape[1]} features, but LODA was fitted on {self._n_features}"
+            )
+        n = len(X)
+        if n == 0:
+            self.scores_ = np.empty(0)
+            return self.scores_
+        projected = X @ self.projections_.T
+        scores = np.zeros(n, dtype=float)
+        for k in range(self.n_random_cuts):
+            heights = _loda_histogram_heights(
+                projected[:, k], self._edges[k], self._hist[k], self._floor
+            )
+            scores += -np.log(heights)
+        scores /= float(self.n_random_cuts)
         self.scores_ = scores
         return self.scores_
 

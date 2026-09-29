@@ -2,10 +2,10 @@
 
 A small, dependency-light toolkit for **unsupervised anomaly / outlier
 detection** in tabular data and time series. It ships classical statistical
-baselines (z-score, median/MAD, IQR fences, generalized ESD) and nine
+baselines (z-score, median/MAD, IQR fences, generalized ESD) and ten
 self-contained models (isolation forest, local outlier factor, k-nearest
 neighbours, COPOD, ECOD, HBOS, one-class SVM, EllipticEnvelope / FAST-MCD,
-CBLOF), plus a seeded synthetic-data generator,
+CBLOF, LODA), plus a seeded synthetic-data generator,
 evaluation metrics, and a markdown report renderer — all built on
 **numpy only** (no scipy, no sklearn).
 
@@ -31,7 +31,8 @@ readable and easy to extend.
   negative decision function, an EllipticEnvelope whose score is the
   Mahalanobis distance under a FAST-MCD robust covariance estimate, and
   CBLOF (cluster-based local outlier factor via k-means large/small
-  clusters and distance-to-large-centre scoring).
+  clusters and distance-to-large-centre scoring), and LODA (random 1-D
+  projections with histogram density scores; higher = more anomalous).
 - **Evaluation** — precision / recall / F1, rank-based ROC-AUC, threshold
   sweep with best-F1 selection, and a comparison table across detectors.
 - **Reports** — markdown renderer with per-detector score summaries, top
@@ -53,7 +54,7 @@ pip install -e .        # optional, exposes the `anomaly-detect` command
 
 ```python
 from anomaly_detection.generators import make_tabular
-from anomaly_detection.models import CBLOF, COPOD, ECOD, EllipticEnvelope, HBOS, IsolationForest, KNN, OneClassSVM
+from anomaly_detection.models import CBLOF, COPOD, ECOD, EllipticEnvelope, HBOS, IsolationForest, KNN, LODA, OneClassSVM
 from anomaly_detection.evaluate import compare_detectors
 
 X, y_true = make_tabular(n_samples=600, contamination=0.05, seed=7)
@@ -67,6 +68,7 @@ detectors = {
     "one-class SVM": OneClassSVM(nu=0.1).fit(X).score_samples,
     "elliptic envelope": EllipticEnvelope(seed=7).fit(X).score_samples,
     "CBLOF": CBLOF(n_clusters=8, seed=7).fit(X).score_samples,
+    "LODA": LODA(n_bins=10, n_random_cuts=100, seed=7).fit(X).score_samples,
 }
 rows = compare_detectors(X, y_true, detectors, contamination=0.05)
 print(rows[0]["f1"], rows[0]["auc"])
@@ -133,6 +135,7 @@ Or without installing: `python -m anomaly_detection <command> ...`.
 | One-class SVM     | model         | higher = more anomalous                | `nu`, `kernel`, `gamma`     |
 | EllipticEnvelope  | model         | higher = more anomalous                | `support_fraction`, `seed`  |
 | CBLOF             | model         | higher = more anomalous                | `n_clusters`, `alpha`, `beta`|
+| LODA              | model         | higher = more anomalous                | `n_bins`, `n_random_cuts`   |
 | z-score           | statistical   | max abs z per row                       | `threshold` (default 3.0)   |
 | Modified z-score  | statistical   | median/MAD robust z                    | `threshold` (default 3.5)   |
 | IQR fences        | statistical   | distance beyond fence / IQR            | `k` (default 1.5)           |
@@ -144,7 +147,7 @@ Or without installing: `python -m anomaly_detection <command> ...`.
 src/anomaly_detection/
 ├── generators.py   # seeded synthetic data (tabular + time series)
 ├── classic.py      # statistical baselines incl. GESD
-├── models.py       # isolation forest, LOF, kNN, COPOD, ECOD, HBOS, one-class SVM, EllipticEnvelope, CBLOF
+├── models.py       # isolation forest, LOF, kNN, COPOD, ECOD, HBOS, one-class SVM, EllipticEnvelope, CBLOF, LODA
 ├── evaluate.py     # metrics, threshold sweep, comparison
 ├── report.py       # markdown rendering
 └── cli.py          # command line interface
@@ -162,6 +165,7 @@ tests/
   runs. COPOD / ECOD (empirical CDFs), HBOS (histograms), kNN (pairwise
   distances) and one-class SVM (SMO on a fixed kernel) are deterministic.
   CBLOF is stochastic in its k-means init; pass a `seed` for reproducible runs.
+  LODA is stochastic in its random projections; pass a `seed` for reproducible runs.
 - Labels come from the synthetic generator, so the metrics measure recovery
   of known-injected outliers, not performance on unlabelled real-world data.
 - The generalized ESD test assumes a roughly normal baseline and can miss
