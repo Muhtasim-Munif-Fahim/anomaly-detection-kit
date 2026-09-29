@@ -3,7 +3,7 @@
 A dependency-light (numpy-only) set of detectors, evaluators and report
 utilities for spotting unusual rows in tabular data and point/level-shift
 anomalies in time series. Model-based detectors include isolation forest,
-local outlier factor, k-nearest neighbours, COPOD, ECOD, HBOS, one-class SVM, EllipticEnvelope (FAST-MCD) and CBLOF.
+local outlier factor, k-nearest neighbours, COPOD, ECOD, HBOS, one-class SVM, EllipticEnvelope (FAST-MCD), CBLOF and LODA.
 """
 
 from . import classic, evaluate, generators, models, report

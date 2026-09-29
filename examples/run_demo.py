@@ -27,6 +27,7 @@ from anomaly_detection.models import (
     OneClassSVM,
     EllipticEnvelope,
     CBLOF,
+    LODA,
     _flags_from_contamination,
 )
 
@@ -54,6 +55,7 @@ def main() -> None:
         "one-class SVM": OneClassSVM(nu=0.1).fit(X).score_samples,
         "elliptic envelope": EllipticEnvelope(seed=SEED).fit(X).score_samples,
         "CBLOF": CBLOF(n_clusters=8, seed=SEED).fit(X).score_samples,
+        "LODA": LODA(n_bins=10, n_random_cuts=100, seed=SEED).fit(X).score_samples,
     }
     detectors.update(STATISTICAL_SCORERS)
 
