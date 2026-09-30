@@ -1,6 +1,6 @@
 """Model-based anomaly detectors.
 
-Nine dependency-free models:
+Eleven dependency-free models:
 
 * :class:`IsolationForest` -- random feature + random split-point trees with
   path-length anomaly scoring (higher score = more anomalous).
@@ -20,10 +20,12 @@ Nine dependency-free models:
 * :class:`EllipticEnvelope` -- FAST-MCD robust covariance / Mahalanobis
   distance (higher score = more anomalous).
 * :class:`CBLOF` -- cluster-based local outlier factor: k-means clusters are
-* :class:`LODA` -- lightweight online detector of anomalies: random
-  1-D projections with histogram density scores (higher = more anomalous).
   labelled large/small, then points score by distance to their own large
   centre or to the nearest large centre (higher score = more anomalous).
+* :class:`LODA` -- lightweight online detector of anomalies: random
+  1-D projections with histogram density scores (higher = more anomalous).
+* :class:`ABOD` -- angle-based outlier detection: negative variance of
+  weighted cosines to k nearest neighbours (higher = more anomalous).
 
 All expose the same interface: ``fit``, ``score_samples(X)`` returning
 continuous anomaly scores, and ``fit_predict(X, contamination=...)``
@@ -1500,6 +1502,111 @@ class LODA:
             scores += -np.log(heights)
         scores /= float(self.n_random_cuts)
         self.scores_ = scores
+        return self.scores_
+
+    def predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
+        return _flags_from_contamination(self.score_samples(X), contamination)
+
+    def fit_predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
+        return self.fit(X).predict(X, contamination=contamination)
+
+
+class ABOD:
+    """Angle-Based Outlier Detection (Kriegel, Schubert & Zimek, 2008).
+
+    Approximate ABOD: for each point, take its ``n_neighbors`` nearest
+    neighbours (or all other points when ``n`` is small) and compute the
+    variance of the weighted cosine
+
+        ``<AB, AC> / (||AB||^2 · ||AC||^2)``
+
+    over neighbour pairs ``(B, C)``. Outliers sit in directions with low
+    angle variance (small ABOF). The returned score is ``-ABOF`` so that
+    **higher scores are more anomalous**, matching the other detectors.
+
+    ``fit`` stores the training rows. Scoring the training matrix excludes
+    each point as its own neighbour. Pass ``seed`` only for API symmetry;
+    the algorithm is deterministic given ``X``.
+    """
+
+    def __init__(
+        self,
+        n_neighbors: int = 10,
+        seed: Optional[int] = None,
+    ) -> None:
+        n_neighbors = int(n_neighbors)
+        if n_neighbors < 2:
+            raise ValueError("n_neighbors must be at least 2")
+        self.n_neighbors = n_neighbors
+        self.seed = seed
+        self.scores_: Optional[np.ndarray] = None
+        self._X_train: Optional[np.ndarray] = None
+        self._n_features: Optional[int] = None
+
+    def fit(self, X: np.ndarray) -> "ABOD":
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array of shape (n_samples, n_features)")
+        n = len(X)
+        if n < 3:
+            raise ValueError("ABOD needs at least three samples")
+        if not np.all(np.isfinite(X)):
+            raise ValueError("X must contain only finite values")
+        self._X_train = np.array(X, dtype=float, copy=True)
+        self._n_features = X.shape[1]
+        return self
+
+    def _abof_rows(self, X: np.ndarray, ref: np.ndarray, exclude_self: bool) -> np.ndarray:
+        n_query = len(X)
+        n_ref = len(ref)
+        if n_query == 0:
+            return np.empty(0)
+        max_k = n_ref - 1 if exclude_self else n_ref
+        if max_k < 2:
+            return np.zeros(n_query)
+        k = min(self.n_neighbors, max_k)
+        D = _euclidean_distances(X, ref)
+        if exclude_self:
+            np.fill_diagonal(D, np.inf)
+        # k nearest neighbour indices per query
+        nn_idx = np.argpartition(D, kth=k - 1, axis=1)[:, :k]
+        scores = np.empty(n_query, dtype=float)
+        eps = 1e-12
+        for i in range(n_query):
+            nbrs = ref[nn_idx[i]]
+            # Vectors from query point to each neighbour: shape (k, p)
+            V = nbrs - X[i]
+            # Squared norms
+            sq = np.einsum("ij,ij->i", V, V)
+            sq = np.maximum(sq, eps)
+            # Weighted cosine weights: <Vb, Vc> / (||Vb||^2 · ||Vc||^2)
+            # = (Vb · Vc) / (sq_b * sq_c)
+            dots = V @ V.T
+            inv_sq = 1.0 / sq
+            W = dots * inv_sq[:, None] * inv_sq[None, :]
+            # Collect off-diagonal pair weights (b < c)
+            vals = W[np.triu_indices(k, k=1)]
+            if vals.size < 2:
+                scores[i] = 0.0
+            else:
+                abof = float(np.var(vals))
+                scores[i] = -abof
+        return scores
+
+    def score_samples(self, X: np.ndarray) -> np.ndarray:
+        if self._X_train is None:
+            raise ValueError("ABOD must be fitted before scoring")
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array of shape (n_samples, n_features)")
+        if X.shape[1] != self._n_features:
+            raise ValueError(
+                f"X has {X.shape[1]} features, but ABOD was fitted on {self._n_features}"
+            )
+        same_train = (
+            X.shape == self._X_train.shape and np.array_equal(X, self._X_train)
+        )
+        self.scores_ = self._abof_rows(X, self._X_train, exclude_self=same_train)
         return self.scores_
 
     def predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
