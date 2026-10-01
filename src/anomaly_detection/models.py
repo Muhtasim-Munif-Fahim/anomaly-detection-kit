@@ -1,6 +1,6 @@
 """Model-based anomaly detectors.
 
-Eleven dependency-free models:
+Twelve dependency-free models:
 
 * :class:`IsolationForest` -- random feature + random split-point trees with
   path-length anomaly scoring (higher score = more anomalous).
@@ -26,6 +26,8 @@ Eleven dependency-free models:
   1-D projections with histogram density scores (higher = more anomalous).
 * :class:`ABOD` -- angle-based outlier detection: negative variance of
   weighted cosines to k nearest neighbours (higher = more anomalous).
+* :class:`COF` -- connectivity-based outlier factor: average chaining
+  distance ratio along the set-based nearest path (higher = more anomalous).
 
 All expose the same interface: ``fit``, ``score_samples(X)`` returning
 continuous anomaly scores, and ``fit_predict(X, contamination=...)``
@@ -1607,6 +1609,168 @@ class ABOD:
             X.shape == self._X_train.shape and np.array_equal(X, self._X_train)
         )
         self.scores_ = self._abof_rows(X, self._X_train, exclude_self=same_train)
+        return self.scores_
+
+    def predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
+        return _flags_from_contamination(self.score_samples(X), contamination)
+
+    def fit_predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
+        return self.fit(X).predict(X, contamination=contamination)
+
+
+class COF:
+    """Connectivity-based Outlier Factor (Tang, Chen, Fu & Cheung, 2002).
+
+    For each point, a set-based nearest (SBN) path through its ``n_neighbors``
+    nearest neighbours yields an average chaining distance (ACD). The COF
+    score is the ratio of the point's ACD to the mean ACD of its neighbours.
+    Points whose neighbourhood is loosely connected score high.
+
+    ``fit`` stores the training rows. Scoring the training matrix excludes
+    each point as its own neighbour. Higher scores are more anomalous.
+    """
+
+    def __init__(
+        self,
+        n_neighbors: int = 20,
+        seed: Optional[int] = None,
+    ) -> None:
+        n_neighbors = int(n_neighbors)
+        if n_neighbors < 1:
+            raise ValueError("n_neighbors must be at least 1")
+        self.n_neighbors = n_neighbors
+        self.seed = seed
+        self.scores_: Optional[np.ndarray] = None
+        self._X_train: Optional[np.ndarray] = None
+        self._n_features: Optional[int] = None
+
+    def fit(self, X: np.ndarray) -> "COF":
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array of shape (n_samples, n_features)")
+        n = len(X)
+        if n < 2:
+            raise ValueError("COF needs at least two samples")
+        if not np.all(np.isfinite(X)):
+            raise ValueError("X must contain only finite values")
+        self._X_train = np.array(X, dtype=float, copy=True)
+        self._n_features = X.shape[1]
+        return self
+
+    def _acd_rows(
+        self, X: np.ndarray, ref: np.ndarray, exclude_self: bool
+    ) -> np.ndarray:
+        """Average chaining distance for each query row against ``ref``."""
+        n_query = len(X)
+        n_ref = len(ref)
+        if n_query == 0:
+            return np.empty(0)
+        max_k = n_ref - 1 if exclude_self else n_ref
+        if max_k < 1:
+            return np.zeros(n_query)
+        k = min(self.n_neighbors, max_k)
+        D = _euclidean_distances(X, ref)
+        if exclude_self:
+            np.fill_diagonal(D, np.inf)
+        # k nearest neighbour indices per query
+        nn_idx = np.argpartition(D, kth=k - 1, axis=1)[:, :k]
+        # Sort neighbours by distance for a stable start of the SBN path.
+        nn_dists = np.take_along_axis(D, nn_idx, axis=1)
+        order = np.argsort(nn_dists, axis=1)
+        nn_idx = np.take_along_axis(nn_idx, order, axis=1)
+
+        # Precompute pairwise distances among ref for SBN chaining.
+        # For large n this is O(n^2); acceptable for the kit's demo sizes.
+        ref_D = _euclidean_distances(ref, ref)
+        np.fill_diagonal(ref_D, 0.0)
+
+        acd = np.empty(n_query, dtype=float)
+        # Geometric path weights: 2*(k-j+1) / (k*(k+1)) for edge j=1..k
+        denom = float(k * (k + 1))
+        weights = np.array(
+            [2.0 * (k - j + 1) / denom for j in range(1, k + 1)], dtype=float
+        )
+
+        for i in range(n_query):
+            nbrs = nn_idx[i].astype(np.int64)
+            # Distances from query to each neighbour (for first hop)
+            d_to_query = D[i, nbrs]
+            # SBN path: start with nearest neighbour, then greedily add the
+            # remaining neighbour closest to the current path set.
+            remaining = list(range(k))
+            path = []  # indices into nbrs
+            # First point: nearest to query
+            first = int(np.argmin(d_to_query))
+            path.append(first)
+            remaining.remove(first)
+            edge_dists = [float(d_to_query[first])]
+
+            # Distance from each neighbour to the query point (as set member 0)
+            # and to other neighbours via ref_D.
+            while remaining:
+                best_r = remaining[0]
+                best_d = float("inf")
+                for r in remaining:
+                    # Dist to query
+                    d_min = float(d_to_query[r])
+                    # Dist to any neighbour already on the path
+                    for p in path:
+                        d_min = min(d_min, float(ref_D[nbrs[r], nbrs[p]]))
+                    if d_min < best_d:
+                        best_d = d_min
+                        best_r = r
+                path.append(best_r)
+                remaining.remove(best_r)
+                edge_dists.append(best_d)
+
+            acd[i] = float(np.dot(weights, edge_dists))
+        return acd
+
+    def score_samples(self, X: np.ndarray) -> np.ndarray:
+        if self._X_train is None:
+            raise ValueError("COF must be fitted before scoring")
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array of shape (n_samples, n_features)")
+        if X.shape[1] != self._n_features:
+            raise ValueError(
+                f"X has {X.shape[1]} features, but COF was fitted on {self._n_features}"
+            )
+        same_train = (
+            X.shape == self._X_train.shape and np.array_equal(X, self._X_train)
+        )
+        n = len(X)
+        if n == 0:
+            self.scores_ = np.empty(0)
+            return self.scores_
+
+        ref = self._X_train
+        exclude_self = same_train
+        max_k = len(ref) - 1 if exclude_self else len(ref)
+        if max_k < 1:
+            self.scores_ = np.ones(n)
+            return self.scores_
+        k = min(self.n_neighbors, max_k)
+
+        acd = self._acd_rows(X, ref, exclude_self=exclude_self)
+
+        # Neighbour indices for the COF ratio (same kNN as ACD).
+        D = _euclidean_distances(X, ref)
+        if exclude_self:
+            np.fill_diagonal(D, np.inf)
+        nn_idx = np.argpartition(D, kth=k - 1, axis=1)[:, :k]
+
+        if same_train:
+            # ACD of neighbours is just acd[nn_idx]
+            nbr_acd = acd[nn_idx]
+        else:
+            # Score neighbours in the reference set
+            ref_acd = self._acd_rows(ref, ref, exclude_self=True)
+            nbr_acd = ref_acd[nn_idx]
+
+        mean_nbr = nbr_acd.mean(axis=1)
+        mean_nbr = np.where(mean_nbr > 1e-15, mean_nbr, 1e-15)
+        self.scores_ = acd / mean_nbr
         return self.scores_
 
     def predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
