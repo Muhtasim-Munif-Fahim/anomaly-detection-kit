@@ -2,10 +2,10 @@
 
 A small, dependency-light toolkit for **unsupervised anomaly / outlier
 detection** in tabular data and time series. It ships classical statistical
-baselines (z-score, median/MAD, IQR fences, generalized ESD) and eleven
+baselines (z-score, median/MAD, IQR fences, generalized ESD) and twelve
 self-contained models (isolation forest, local outlier factor, k-nearest
 neighbours, COPOD, ECOD, HBOS, one-class SVM, EllipticEnvelope / FAST-MCD,
-CBLOF, LODA, ABOD), plus a seeded synthetic-data generator,
+CBLOF, LODA, ABOD, COF), plus a seeded synthetic-data generator,
 evaluation metrics, and a markdown report renderer — all built on
 **numpy only** (no scipy, no sklearn).
 
@@ -34,7 +34,9 @@ readable and easy to extend.
   clusters and distance-to-large-centre scoring), and LODA (random 1-D
   projections with histogram density scores; higher = more anomalous),
   and ABOD (angle-based outlier detection via negative ABOF of weighted
-  cosines to k nearest neighbours; higher = more anomalous).
+  cosines to k nearest neighbours; higher = more anomalous), and COF
+  (connectivity-based outlier factor via average chaining distance along
+  the set-based nearest path; higher = more anomalous).
 - **Evaluation** — precision / recall / F1, rank-based ROC-AUC, threshold
   sweep with best-F1 selection, and a comparison table across detectors.
 - **Reports** — markdown renderer with per-detector score summaries, top
@@ -56,7 +58,7 @@ pip install -e .        # optional, exposes the `anomaly-detect` command
 
 ```python
 from anomaly_detection.generators import make_tabular
-from anomaly_detection.models import ABOD, CBLOF, COPOD, ECOD, EllipticEnvelope, HBOS, IsolationForest, KNN, LODA, OneClassSVM
+from anomaly_detection.models import ABOD, CBLOF, COF, COPOD, ECOD, EllipticEnvelope, HBOS, IsolationForest, KNN, LODA, OneClassSVM
 from anomaly_detection.evaluate import compare_detectors
 
 X, y_true = make_tabular(n_samples=600, contamination=0.05, seed=7)
@@ -72,6 +74,7 @@ detectors = {
     "CBLOF": CBLOF(n_clusters=8, seed=7).fit(X).score_samples,
     "LODA": LODA(n_bins=10, n_random_cuts=100, seed=7).fit(X).score_samples,
     "ABOD": ABOD(n_neighbors=10).fit(X).score_samples,
+    "COF": COF(n_neighbors=20).fit(X).score_samples,
 }
 rows = compare_detectors(X, y_true, detectors, contamination=0.05)
 print(rows[0]["f1"], rows[0]["auc"])
@@ -140,6 +143,7 @@ Or without installing: `python -m anomaly_detection <command> ...`.
 | CBLOF             | model         | higher = more anomalous                | `n_clusters`, `alpha`, `beta`|
 | LODA              | model         | higher = more anomalous                | `n_bins`, `n_random_cuts`   |
 | ABOD              | model         | higher = more anomalous                | `n_neighbors`               |
+| COF               | model         | higher = more anomalous                | `n_neighbors`               |
 | z-score           | statistical   | max abs z per row                       | `threshold` (default 3.0)   |
 | Modified z-score  | statistical   | median/MAD robust z                    | `threshold` (default 3.5)   |
 | IQR fences        | statistical   | distance beyond fence / IQR            | `k` (default 1.5)           |
@@ -151,7 +155,7 @@ Or without installing: `python -m anomaly_detection <command> ...`.
 src/anomaly_detection/
 ├── generators.py   # seeded synthetic data (tabular + time series)
 ├── classic.py      # statistical baselines incl. GESD
-├── models.py       # isolation forest, LOF, kNN, COPOD, ECOD, HBOS, one-class SVM, EllipticEnvelope, CBLOF, LODA, ABOD
+├── models.py       # isolation forest, LOF, kNN, COPOD, ECOD, HBOS, one-class SVM, EllipticEnvelope, CBLOF, LODA, ABOD, COF, COF
 ├── evaluate.py     # metrics, threshold sweep, comparison
 ├── report.py       # markdown rendering
 └── cli.py          # command line interface
