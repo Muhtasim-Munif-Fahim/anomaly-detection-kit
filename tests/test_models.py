@@ -1229,3 +1229,65 @@ class TestCOF:
         X[0] = [20.0, 20.0]
         flags = m.COF(n_neighbors=15).fit(X).predict(X, contamination=0.02)
         assert flags[0] == 1
+
+
+class TestSOD:
+    def test_scores_shape_and_finite(self):
+        X, _ = g.make_tabular(200, 4, 3, contamination=0.05, seed=501)
+        s = m.SOD(n_neighbors=15).fit(X).score_samples(X)
+        assert s.shape == (200,)
+        assert np.all(np.isfinite(s))
+
+    def test_contamination_predict(self):
+        X, _ = g.make_tabular(150, 3, 2, contamination=0.05, seed=502)
+        flags = m.SOD(n_neighbors=10).fit(X).predict(X, contamination=0.1)
+        assert flags.shape == (150,)
+        assert set(np.unique(flags)).issubset({0, 1})
+        assert int(flags.sum()) == 15
+
+    def test_deterministic(self):
+        X, _ = g.make_tabular(100, 3, 2, contamination=0.05, seed=503)
+        s1 = m.SOD(n_neighbors=12).fit(X).score_samples(X)
+        s2 = m.SOD(n_neighbors=12).fit(X).score_samples(X)
+        assert np.array_equal(s1, s2)
+
+    def test_outliers_score_higher(self):
+        X, y = g.make_tabular(
+            400, 4, 3, contamination=0.05, outlier_types="shift", seed=504
+        )
+        s = m.SOD(n_neighbors=20).fit(X).score_samples(X)
+        assert s[y == 1].mean() > s[y == 0].mean()
+
+    def test_fit_predict_matches_predict(self):
+        X, _ = g.make_tabular(80, 3, 2, contamination=0.05, seed=505)
+        model = m.SOD(n_neighbors=8)
+        f1 = model.fit(X).predict(X, contamination=0.1)
+        f2 = model.fit_predict(X, contamination=0.1)
+        assert np.array_equal(f1, f2)
+
+    def test_score_before_fit_raises(self):
+        with pytest.raises(ValueError):
+            m.SOD().score_samples(np.zeros((5, 2)))
+
+    def test_rejects_bad_X(self):
+        with pytest.raises(ValueError):
+            m.SOD().fit(np.arange(10.0))
+        with pytest.raises(ValueError):
+            m.SOD().fit(np.zeros((1, 3)))
+        with pytest.raises(ValueError):
+            m.SOD(n_neighbors=0)
+        with pytest.raises(ValueError):
+            m.SOD(alpha=0.0)
+
+    def test_feature_mismatch_raises(self):
+        X = np.random.default_rng(0).normal(size=(40, 3))
+        model = m.SOD(n_neighbors=5).fit(X)
+        with pytest.raises(ValueError):
+            model.score_samples(np.zeros((5, 4)))
+
+    def test_flags_obvious_outlier(self):
+        rng = np.random.default_rng(0)
+        X = rng.normal(size=(200, 2))
+        X[0] = [20.0, 20.0]
+        flags = m.SOD(n_neighbors=15).fit(X).predict(X, contamination=0.02)
+        assert flags[0] == 1

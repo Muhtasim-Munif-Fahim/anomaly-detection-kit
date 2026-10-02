@@ -1,6 +1,6 @@
 """Model-based anomaly detectors.
 
-Twelve dependency-free models:
+Thirteen dependency-free models:
 
 * :class:`IsolationForest` -- random feature + random split-point trees with
   path-length anomaly scoring (higher score = more anomalous).
@@ -28,6 +28,9 @@ Twelve dependency-free models:
   weighted cosines to k nearest neighbours (higher = more anomalous).
 * :class:`COF` -- connectivity-based outlier factor: average chaining
   distance ratio along the set-based nearest path (higher = more anomalous).
+* :class:`SOD` -- subspace outlier detection: normalised distance to the
+  neighbour mean in a locally relevant axis-parallel subspace (higher =
+  more anomalous).
 
 All expose the same interface: ``fit``, ``score_samples(X)`` returning
 continuous anomaly scores, and ``fit_predict(X, contamination=...)``
@@ -1771,6 +1774,111 @@ class COF:
         mean_nbr = nbr_acd.mean(axis=1)
         mean_nbr = np.where(mean_nbr > 1e-15, mean_nbr, 1e-15)
         self.scores_ = acd / mean_nbr
+        return self.scores_
+
+    def predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
+        return _flags_from_contamination(self.score_samples(X), contamination)
+
+    def fit_predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
+        return self.fit(X).predict(X, contamination=contamination)
+
+
+class SOD:
+    """Subspace Outlier Detection (Kriegel, Kröger, Schubert & Zimek, 2009).
+
+    For each point, its ``n_neighbors`` nearest neighbours define a local
+    reference set. Per-dimension variance among those neighbours marks a
+    *relevant* subspace: dimensions whose variance is at most ``alpha`` times
+    the mean variance. The SOD score is the Euclidean distance from the point
+    to the neighbour mean in that subspace, normalised by
+    ``sqrt(|relevant|)``. Points that deviate in a tight local subspace score
+    high. Higher scores are more anomalous.
+    """
+
+    def __init__(
+        self,
+        n_neighbors: int = 20,
+        alpha: float = 1.1,
+        seed: Optional[int] = None,
+    ) -> None:
+        n_neighbors = int(n_neighbors)
+        alpha = float(alpha)
+        if n_neighbors < 1:
+            raise ValueError("n_neighbors must be at least 1")
+        if not (alpha > 0.0) or not np.isfinite(alpha):
+            raise ValueError("alpha must be a positive finite float")
+        self.n_neighbors = n_neighbors
+        self.alpha = alpha
+        self.seed = seed
+        self.scores_: Optional[np.ndarray] = None
+        self._X_train: Optional[np.ndarray] = None
+        self._n_features: Optional[int] = None
+
+    def fit(self, X: np.ndarray) -> "SOD":
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array of shape (n_samples, n_features)")
+        n = len(X)
+        if n < 2:
+            raise ValueError("SOD needs at least two samples")
+        if not np.all(np.isfinite(X)):
+            raise ValueError("X must contain only finite values")
+        self._X_train = np.array(X, dtype=float, copy=True)
+        self._n_features = X.shape[1]
+        return self
+
+    def _sod_scores(
+        self, X: np.ndarray, ref: np.ndarray, exclude_self: bool
+    ) -> np.ndarray:
+        n_query = len(X)
+        n_ref = len(ref)
+        if n_query == 0:
+            return np.empty(0)
+        max_k = n_ref - 1 if exclude_self else n_ref
+        if max_k < 1:
+            return np.zeros(n_query)
+        k = min(self.n_neighbors, max_k)
+        D = _euclidean_distances(X, ref)
+        if exclude_self:
+            np.fill_diagonal(D, np.inf)
+        nn_idx = np.argpartition(D, kth=k - 1, axis=1)[:, :k]
+        scores = np.empty(n_query, dtype=float)
+        alpha = self.alpha
+        for i in range(n_query):
+            nbrs = ref[nn_idx[i]]
+            # Per-dimension sample variance of the neighbourhood.
+            if k == 1:
+                var = np.zeros(ref.shape[1], dtype=float)
+            else:
+                var = nbrs.var(axis=0, ddof=0)
+            mean_var = float(var.mean())
+            if mean_var <= 1e-15:
+                # Flat neighbourhood: fall back to full-space deviation.
+                relevant = np.ones(ref.shape[1], dtype=bool)
+            else:
+                relevant = var <= (alpha * mean_var)
+                if not np.any(relevant):
+                    relevant = np.ones(ref.shape[1], dtype=bool)
+            mu = nbrs[:, relevant].mean(axis=0)
+            diff = X[i, relevant] - mu
+            denom = math.sqrt(float(relevant.sum()))
+            scores[i] = float(np.linalg.norm(diff) / denom) if denom > 0 else 0.0
+        return scores
+
+    def score_samples(self, X: np.ndarray) -> np.ndarray:
+        if self._X_train is None:
+            raise ValueError("SOD must be fitted before scoring")
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array of shape (n_samples, n_features)")
+        if X.shape[1] != self._n_features:
+            raise ValueError(
+                f"X has {X.shape[1]} features, but SOD was fitted on {self._n_features}"
+            )
+        same_train = (
+            X.shape == self._X_train.shape and np.array_equal(X, self._X_train)
+        )
+        self.scores_ = self._sod_scores(X, self._X_train, exclude_self=same_train)
         return self.scores_
 
     def predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
