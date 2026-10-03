@@ -1,6 +1,6 @@
 """Model-based anomaly detectors.
 
-Thirteen dependency-free models:
+Fourteen dependency-free models:
 
 * :class:`IsolationForest` -- random feature + random split-point trees with
   path-length anomaly scoring (higher score = more anomalous).
@@ -30,6 +30,9 @@ Thirteen dependency-free models:
   distance ratio along the set-based nearest path (higher = more anomalous).
 * :class:`SOD` -- subspace outlier detection: normalised distance to the
   neighbour mean in a locally relevant axis-parallel subspace (higher =
+  more anomalous).
+* :class:`PCA` -- PCA reconstruction-error outlier detector: squared L2
+  residual after projecting onto the leading principal components (higher =
   more anomalous).
 
 All expose the same interface: ``fit``, ``score_samples(X)`` returning
@@ -1879,6 +1882,129 @@ class SOD:
             X.shape == self._X_train.shape and np.array_equal(X, self._X_train)
         )
         self.scores_ = self._sod_scores(X, self._X_train, exclude_self=same_train)
+        return self.scores_
+
+    def predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
+        return _flags_from_contamination(self.score_samples(X), contamination)
+
+    def fit_predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
+        return self.fit(X).predict(X, contamination=contamination)
+
+class PCA:
+    """PCA reconstruction-error outlier detector.
+
+    Fit centres the training matrix, computes a thin SVD, and keeps the
+    leading ``n_components`` principal directions (an integer rank, or a
+    float in ``(0, 1]`` interpreted as a cumulative explained-variance
+    ratio). Anomaly scores are the squared Euclidean reconstruction error
+    ``||x - x_hat||_2^2``; larger residuals are more anomalous.
+    """
+
+    def __init__(
+        self,
+        n_components: Optional[float] = None,
+        seed: Optional[int] = None,
+    ) -> None:
+        if n_components is not None:
+            if isinstance(n_components, bool):
+                raise ValueError("n_components must be an int or a float in (0, 1]")
+            if isinstance(n_components, (int, np.integer)):
+                if int(n_components) < 1:
+                    raise ValueError("n_components must be a positive integer")
+                n_components = int(n_components)
+            else:
+                n_components = float(n_components)
+                if not (0.0 < n_components <= 1.0) or not np.isfinite(n_components):
+                    raise ValueError(
+                        "n_components float must be in (0, 1] (variance ratio)"
+                    )
+        self.n_components = n_components
+        self.seed = seed
+        self.scores_: Optional[np.ndarray] = None
+        self.mean_: Optional[np.ndarray] = None
+        self.components_: Optional[np.ndarray] = None
+        self.explained_variance_: Optional[np.ndarray] = None
+        self.explained_variance_ratio_: Optional[np.ndarray] = None
+        self.n_components_: Optional[int] = None
+        self._n_features: Optional[int] = None
+
+    def _resolve_n_components(
+        self, n_samples: int, n_features: int, singular_values: np.ndarray
+    ) -> int:
+        max_k = min(n_features, max(1, n_samples - 1), singular_values.size)
+        req = self.n_components
+        if req is None:
+            return max_k
+        if isinstance(req, (int, np.integer)):
+            k = int(req)
+            if k < 1:
+                raise ValueError("n_components must be a positive integer")
+            if k > max_k:
+                raise ValueError(
+                    f"n_components={k} exceeds max possible rank {max_k}"
+                )
+            return k
+        # Variance-ratio float in (0, 1]
+        total = float(np.sum(singular_values ** 2))
+        if total <= 0.0:
+            return 1
+        ratios = (singular_values ** 2) / total
+        cum = np.cumsum(ratios)
+        k = int(np.searchsorted(cum, float(req), side="left") + 1)
+        return min(max(k, 1), max_k)
+
+    def fit(self, X: np.ndarray) -> "PCA":
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array of shape (n_samples, n_features)")
+        n_samples, n_features = X.shape
+        if n_samples < 2:
+            raise ValueError("PCA needs at least two samples")
+        if n_features < 1:
+            raise ValueError("PCA needs at least one feature")
+        if not np.all(np.isfinite(X)):
+            raise ValueError("X must contain only finite values")
+
+        mean = X.mean(axis=0)
+        Xc = X - mean
+        # Economy SVD; Vt rows are principal directions.
+        _, s, vt = np.linalg.svd(Xc, full_matrices=False)
+        k = self._resolve_n_components(n_samples, n_features, s)
+        components = vt[:k]
+        # Population-style variances along each component (match sklearn n_samples).
+        ev = (s[:k] ** 2) / float(n_samples)
+        total = float(np.sum(s ** 2)) / float(n_samples)
+        evr = ev / total if total > 0.0 else np.zeros_like(ev)
+
+        self.mean_ = mean
+        self.components_ = components
+        self.explained_variance_ = ev
+        self.explained_variance_ratio_ = evr
+        self.n_components_ = k
+        self._n_features = n_features
+        return self
+
+    def _reconstruct(self, X: np.ndarray) -> np.ndarray:
+        Xc = X - self.mean_
+        # Project then lift: X_hat = (Xc @ V.T) @ V + mean
+        codes = Xc @ self.components_.T
+        return codes @ self.components_ + self.mean_
+
+    def score_samples(self, X: np.ndarray) -> np.ndarray:
+        if self.mean_ is None or self.components_ is None:
+            raise ValueError("PCA must be fitted before scoring")
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array of shape (n_samples, n_features)")
+        if X.shape[1] != self._n_features:
+            raise ValueError(
+                f"X has {X.shape[1]} features, but PCA was fitted on {self._n_features}"
+            )
+        if not np.all(np.isfinite(X)):
+            raise ValueError("X must contain only finite values")
+        X_hat = self._reconstruct(X)
+        resid = X - X_hat
+        self.scores_ = np.sum(resid * resid, axis=1)
         return self.scores_
 
     def predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
