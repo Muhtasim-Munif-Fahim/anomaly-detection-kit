@@ -1291,3 +1291,92 @@ class TestSOD:
         X[0] = [20.0, 20.0]
         flags = m.SOD(n_neighbors=15).fit(X).predict(X, contamination=0.02)
         assert flags[0] == 1
+
+class TestPCA:
+    def test_scores_shape_and_finite(self):
+        X, _ = g.make_tabular(200, 4, 3, contamination=0.05, seed=601)
+        s = m.PCA(n_components=2).fit(X).score_samples(X)
+        assert s.shape == (200,)
+        assert np.all(np.isfinite(s))
+        assert np.all(s >= -1e-12)
+
+    def test_contamination_predict(self):
+        X, _ = g.make_tabular(150, 3, 2, contamination=0.05, seed=602)
+        flags = m.PCA(n_components=2).fit(X).predict(X, contamination=0.1)
+        assert flags.shape == (150,)
+        assert set(np.unique(flags)).issubset({0, 1})
+        assert int(flags.sum()) == 15
+
+    def test_deterministic(self):
+        X, _ = g.make_tabular(100, 3, 2, contamination=0.05, seed=603)
+        s1 = m.PCA(n_components=2).fit(X).score_samples(X)
+        s2 = m.PCA(n_components=2).fit(X).score_samples(X)
+        assert np.array_equal(s1, s2)
+
+    def test_outliers_score_higher(self):
+        X, y = g.make_tabular(
+            400, 4, 3, contamination=0.05, outlier_types="shift", seed=604
+        )
+        s = m.PCA(n_components=2).fit(X).score_samples(X)
+        assert s[y == 1].mean() > s[y == 0].mean()
+
+    def test_fit_predict_matches_predict(self):
+        X, _ = g.make_tabular(80, 3, 2, contamination=0.05, seed=605)
+        model = m.PCA(n_components=2)
+        f1 = model.fit(X).predict(X, contamination=0.1)
+        f2 = model.fit_predict(X, contamination=0.1)
+        assert np.array_equal(f1, f2)
+
+    def test_score_before_fit_raises(self):
+        with pytest.raises(ValueError):
+            m.PCA().score_samples(np.zeros((5, 2)))
+
+    def test_rejects_bad_X(self):
+        with pytest.raises(ValueError):
+            m.PCA().fit(np.arange(10.0))
+        with pytest.raises(ValueError):
+            m.PCA().fit(np.zeros((1, 3)))
+        with pytest.raises(ValueError):
+            m.PCA(n_components=0)
+        with pytest.raises(ValueError):
+            m.PCA(n_components=1.5)
+        with pytest.raises(ValueError):
+            m.PCA(n_components=-0.1)
+
+    def test_feature_mismatch_raises(self):
+        X = np.random.default_rng(0).normal(size=(40, 3))
+        model = m.PCA(n_components=2).fit(X)
+        with pytest.raises(ValueError):
+            model.score_samples(np.zeros((5, 4)))
+
+    def test_flags_obvious_outlier(self):
+        rng = np.random.default_rng(0)
+        # Nearly rank-2 data in 5-D; one point far off the manifold.
+        base = rng.normal(size=(500, 2))
+        X = np.hstack([base, 0.05 * rng.normal(size=(500, 3))])
+        X[0] = [0.0, 0.0, 10.0, 10.0, 10.0]
+        flags = m.PCA(n_components=2).fit(X).predict(X, contamination=0.01)
+        assert flags[0] == 1
+
+    def test_variance_ratio_n_components(self):
+        rng = np.random.default_rng(7)
+        # Low-rank signal in 2 dims + noise in others
+        Z = rng.normal(size=(120, 2))
+        X = np.column_stack([Z, 0.01 * rng.normal(size=(120, 4))])
+        model = m.PCA(n_components=0.95).fit(X)
+        assert model.n_components_ >= 1
+        assert model.n_components_ <= X.shape[1]
+        assert model.explained_variance_ratio_ is not None
+        assert float(model.explained_variance_ratio_.sum()) >= 0.95 - 1e-9
+
+    def test_full_rank_near_zero_train_error(self):
+        rng = np.random.default_rng(1)
+        X = rng.normal(size=(50, 3))
+        # Keep all components: reconstruction of training data ~ 0
+        s = m.PCA(n_components=3).fit(X).score_samples(X)
+        assert np.allclose(s, 0.0, atol=1e-8)
+
+    def test_default_n_components(self):
+        X = np.random.default_rng(2).normal(size=(30, 5))
+        model = m.PCA().fit(X)
+        assert model.n_components_ == min(5, 30 - 1)
