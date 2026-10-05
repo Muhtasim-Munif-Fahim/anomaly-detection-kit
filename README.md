@@ -2,10 +2,10 @@
 
 A small, dependency-light toolkit for **unsupervised anomaly / outlier
 detection** in tabular data and time series. It ships classical statistical
-baselines (z-score, median/MAD, IQR fences, generalized ESD) and fourteen
+baselines (z-score, median/MAD, IQR fences, generalized ESD) and fifteen
 self-contained models (isolation forest, local outlier factor, k-nearest
 neighbours, COPOD, ECOD, HBOS, one-class SVM, EllipticEnvelope / FAST-MCD,
-CBLOF, LODA, ABOD, COF, SOD, PCA), plus a seeded synthetic-data generator,
+CBLOF, LODA, ABOD, COF, SOD, PCA, KDE), plus a seeded synthetic-data generator,
 evaluation metrics, and a markdown report renderer — all built on
 **numpy only** (no scipy, no sklearn).
 
@@ -40,7 +40,9 @@ readable and easy to extend.
   (subspace outlier detection via normalised distance to the neighbour mean
   in a locally relevant axis-parallel subspace; higher = more anomalous), and PCA
   (reconstruction-error outlier detector via squared L2 residual after a low-rank
-  PCA projection; higher = more anomalous).
+  PCA projection; higher = more anomalous), and KDE (Gaussian kernel density
+  estimation scored by negative log density with Scott/Silverman/fixed
+  bandwidth and leave-one-out training scores; higher = more anomalous).
 - **Evaluation** — precision / recall / F1, rank-based ROC-AUC, threshold
   sweep with best-F1 selection, and a comparison table across detectors.
 - **Reports** — markdown renderer with per-detector score summaries, top
@@ -62,7 +64,7 @@ pip install -e .        # optional, exposes the `anomaly-detect` command
 
 ```python
 from anomaly_detection.generators import make_tabular
-from anomaly_detection.models import ABOD, CBLOF, COF, COPOD, ECOD, EllipticEnvelope, HBOS, IsolationForest, KNN, LODA, OneClassSVM, PCA, SOD
+from anomaly_detection.models import ABOD, CBLOF, COF, COPOD, ECOD, EllipticEnvelope, HBOS, IsolationForest, KDE, KNN, LODA, OneClassSVM, PCA, SOD
 from anomaly_detection.evaluate import compare_detectors
 
 X, y_true = make_tabular(n_samples=600, contamination=0.05, seed=7)
@@ -81,6 +83,7 @@ detectors = {
     "COF": COF(n_neighbors=20).fit(X).score_samples,
     "SOD": SOD(n_neighbors=20).fit(X).score_samples,
     "PCA": PCA(n_components=0.95).fit(X).score_samples,
+    "KDE": KDE(bandwidth="scott").fit(X).score_samples,
 }
 rows = compare_detectors(X, y_true, detectors, contamination=0.05)
 print(rows[0]["f1"], rows[0]["auc"])
@@ -112,6 +115,21 @@ from anomaly_detection.models import OneClassSVM
 ocsvm = OneClassSVM(nu=0.1, kernel="rbf").fit(X)
 scores = ocsvm.score_samples(X)
 flags = ocsvm.predict(X, contamination=0.05)
+```
+
+Kernel density estimation scores each row by its negative log density
+under an isotropic Gaussian KDE fitted to the (standardised) training rows.
+``bandwidth`` accepts ``"scott"``, ``"silverman"`` or a positive float;
+scoring the training matrix uses a leave-one-out density. Higher scores are
+more anomalous:
+
+```python
+from anomaly_detection.models import KDE
+
+kde = KDE(bandwidth="silverman").fit(X)
+scores = kde.score_samples(X)
+flags = kde.predict(X, contamination=0.05)
+print(kde.bandwidth_)
 ```
 
 ### Demo
@@ -152,6 +170,7 @@ Or without installing: `python -m anomaly_detection <command> ...`.
 | COF               | model         | higher = more anomalous                | `n_neighbors`               |
 | SOD               | model         | higher = more anomalous                | `n_neighbors`, `alpha`      |
 | PCA               | model         | higher = more anomalous                | `n_components`              |
+| KDE               | model         | higher = more anomalous                | `bandwidth`, `standardize`  |
 | z-score           | statistical   | max abs z per row                       | `threshold` (default 3.0)   |
 | Modified z-score  | statistical   | median/MAD robust z                    | `threshold` (default 3.5)   |
 | IQR fences        | statistical   | distance beyond fence / IQR            | `k` (default 1.5)           |
@@ -163,7 +182,7 @@ Or without installing: `python -m anomaly_detection <command> ...`.
 src/anomaly_detection/
 ├── generators.py   # seeded synthetic data (tabular + time series)
 ├── classic.py      # statistical baselines incl. GESD
-├── models.py       # isolation forest, LOF, kNN, COPOD, ECOD, HBOS, one-class SVM, EllipticEnvelope, CBLOF, LODA, ABOD, COF, SOD, PCA
+├── models.py       # isolation forest, LOF, kNN, COPOD, ECOD, HBOS, one-class SVM, EllipticEnvelope, CBLOF, LODA, ABOD, COF, SOD, PCA, KDE
 ├── evaluate.py     # metrics, threshold sweep, comparison
 ├── report.py       # markdown rendering
 └── cli.py          # command line interface

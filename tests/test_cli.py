@@ -189,7 +189,21 @@ class TestParser:
             "elliptic",
             "cblof",
             "loda",
+            "abod",
+            "cof",
+            "sod",
+            "pca",
+            "kde",
             "zscore",
             "mad",
             "iqr",
         ]
+
+
+def test_detect_with_kde_runs(tmp_path):
+    import numpy as np
+
+    X = np.random.default_rng(0).normal(size=(40, 3))
+    scores = cli._detector_scores("kde", X, seed=0)
+    assert scores.shape == (40,)
+    assert np.all(np.isfinite(scores))

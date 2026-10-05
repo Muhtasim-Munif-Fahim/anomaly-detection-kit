@@ -1380,3 +1380,126 @@ class TestPCA:
         X = np.random.default_rng(2).normal(size=(30, 5))
         model = m.PCA().fit(X)
         assert model.n_components_ == min(5, 30 - 1)
+
+
+class TestKDE:
+    LOG_SQRT_2PI = 0.5 * np.log(2.0 * np.pi)
+
+    def test_scores_shape_and_finite(self):
+        X, _ = g.make_tabular(200, 4, 3, contamination=0.05, seed=701)
+        s = m.KDE().fit(X).score_samples(X)
+        assert s.shape == (200,)
+        assert np.all(np.isfinite(s))
+
+    def test_known_value_query(self):
+        # Two training points at 0 and 1, h = 1: density at 0.5 is phi(0.5).
+        X = np.array([[0.0], [1.0]])
+        model = m.KDE(bandwidth=1.0, standardize=False).fit(X)
+        s = model.score_samples(np.array([[0.5]]))
+        assert s[0] == pytest.approx(self.LOG_SQRT_2PI + 0.125)
+        assert model.bandwidth_ == 1.0
+
+    def test_known_value_leave_one_out(self):
+        # Scoring the training set excludes each point: density = phi(1).
+        X = np.array([[0.0], [1.0]])
+        s = m.KDE(bandwidth=1.0, standardize=False).fit(X).score_samples(X)
+        assert np.allclose(s, self.LOG_SQRT_2PI + 0.5)
+
+    def test_matches_brute_force_density(self):
+        rng = np.random.default_rng(3)
+        X = rng.normal(size=(30, 2))
+        Q = rng.normal(size=(7, 2))
+        h = 0.7
+        model = m.KDE(bandwidth=h, standardize=False).fit(X)
+        s = model.score_samples(Q)
+        d2 = ((Q[:, None, :] - X[None, :, :]) ** 2).sum(-1)
+        dens = np.exp(-d2 / (2 * h * h)).sum(1) / (30 * h * h * 2 * np.pi)
+        assert np.allclose(s, -np.log(dens))
+
+    def test_far_query_stays_finite(self):
+        X = np.random.default_rng(0).normal(size=(50, 3))
+        s = m.KDE(bandwidth=0.1).fit(X).score_samples(np.full((1, 3), 1e3))
+        assert np.isfinite(s[0])
+        assert s[0] > 1e6
+
+    def test_scott_and_silverman_bandwidths(self):
+        X = np.random.default_rng(1).normal(size=(100, 2))
+        scott = m.KDE("scott").fit(X).bandwidth_
+        silver = m.KDE("silverman").fit(X).bandwidth_
+        assert scott == pytest.approx(100 ** (-1.0 / 6))
+        assert silver == pytest.approx((100 * 4 / 4.0) ** (-1.0 / 6))
+
+    def test_unstandardized_rule_scales_with_data(self):
+        X = np.random.default_rng(2).normal(size=(80, 2))
+        h1 = m.KDE(standardize=False).fit(X).bandwidth_
+        h10 = m.KDE(standardize=False).fit(10 * X).bandwidth_
+        assert h10 == pytest.approx(10 * h1)
+
+    def test_standardize_is_scale_invariant(self):
+        X = np.random.default_rng(4).normal(size=(60, 3))
+        s1 = m.KDE().fit(X).score_samples(X)
+        X2 = X * np.array([1.0, 100.0, 0.01]) + 5.0
+        s2 = m.KDE().fit(X2).score_samples(X2)
+        # Densities differ only by the constant log-Jacobian; ranks equal.
+        assert np.array_equal(np.argsort(s1), np.argsort(s2))
+
+    def test_constant_feature_ok(self):
+        X = np.column_stack([np.random.default_rng(5).normal(size=40), np.ones(40)])
+        s = m.KDE().fit(X).score_samples(X)
+        assert np.all(np.isfinite(s))
+
+    def test_contamination_predict(self):
+        X, _ = g.make_tabular(150, 3, 2, contamination=0.05, seed=702)
+        flags = m.KDE().fit(X).predict(X, contamination=0.1)
+        assert set(np.unique(flags)).issubset({0, 1})
+        assert int(flags.sum()) == 15
+
+    def test_deterministic(self):
+        X, _ = g.make_tabular(100, 3, 2, contamination=0.05, seed=703)
+        s1 = m.KDE(seed=1).fit(X).score_samples(X)
+        s2 = m.KDE(seed=2).fit(X).score_samples(X)
+        assert np.array_equal(s1, s2)
+
+    def test_outliers_score_higher(self):
+        X, y = g.make_tabular(
+            400, 4, 3, contamination=0.05, outlier_types="shift", seed=704
+        )
+        s = m.KDE().fit(X).score_samples(X)
+        assert s[y == 1].mean() > s[y == 0].mean()
+
+    def test_flags_obvious_outlier(self):
+        rng = np.random.default_rng(0)
+        X = rng.normal(size=(300, 2))
+        X[0] = [8.0, -8.0]
+        flags = m.KDE().fit(X).predict(X, contamination=0.01)
+        assert flags[0] == 1
+
+    def test_fit_predict_matches_predict(self):
+        X, _ = g.make_tabular(80, 3, 2, contamination=0.05, seed=705)
+        model = m.KDE()
+        assert np.array_equal(
+            model.fit(X).predict(X, contamination=0.1),
+            model.fit_predict(X, contamination=0.1),
+        )
+
+    def test_score_before_fit_raises(self):
+        with pytest.raises(ValueError):
+            m.KDE().score_samples(np.zeros((5, 2)))
+
+    def test_rejects_bad_params(self):
+        for bad in ["gauss", 0.0, -1.0, float("nan"), float("inf"), True]:
+            with pytest.raises(ValueError):
+                m.KDE(bandwidth=bad)
+
+    def test_rejects_bad_X(self):
+        with pytest.raises(ValueError):
+            m.KDE().fit(np.arange(10.0))
+        with pytest.raises(ValueError):
+            m.KDE().fit(np.zeros((1, 3)))
+        with pytest.raises(ValueError):
+            m.KDE().fit(np.array([[0.0, np.nan], [1.0, 2.0]]))
+        model = m.KDE().fit(np.random.default_rng(0).normal(size=(20, 3)))
+        with pytest.raises(ValueError):
+            model.score_samples(np.zeros((5, 4)))
+        with pytest.raises(ValueError):
+            model.score_samples(np.array([[np.inf, 0.0, 0.0]]))
