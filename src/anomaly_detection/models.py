@@ -1,6 +1,6 @@
 """Model-based anomaly detectors.
 
-Fourteen dependency-free models:
+Fifteen dependency-free models:
 
 * :class:`IsolationForest` -- random feature + random split-point trees with
   path-length anomaly scoring (higher score = more anomalous).
@@ -34,6 +34,9 @@ Fourteen dependency-free models:
 * :class:`PCA` -- PCA reconstruction-error outlier detector: squared L2
   residual after projecting onto the leading principal components (higher =
   more anomalous).
+* :class:`KDE` -- Gaussian kernel density estimation: negative log density
+  under a Scott/Silverman/fixed-bandwidth isotropic KDE, leave-one-out on
+  the training rows (higher = more anomalous).
 
 All expose the same interface: ``fit``, ``score_samples(X)`` returning
 continuous anomaly scores, and ``fit_predict(X, contamination=...)``
@@ -2005,6 +2008,149 @@ class PCA:
         X_hat = self._reconstruct(X)
         resid = X - X_hat
         self.scores_ = np.sum(resid * resid, axis=1)
+        return self.scores_
+
+    def predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
+        return _flags_from_contamination(self.score_samples(X), contamination)
+
+    def fit_predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
+        return self.fit(X).predict(X, contamination=contamination)
+
+
+def _kde_bandwidth_factor(rule: str, n: int, d: int) -> float:
+    """Scott / Silverman rule-of-thumb factor for a ``d``-dimensional KDE."""
+    if rule == "scott":
+        return float(n) ** (-1.0 / (d + 4))
+    # Silverman: (n (d + 2) / 4) ** (-1 / (d + 4))
+    return (float(n) * (d + 2) / 4.0) ** (-1.0 / (d + 4))
+
+
+class KDE:
+    """Gaussian kernel density estimation outlier detector.
+
+    Fits an isotropic Gaussian KDE
+
+        ``p(x) = 1 / (n h^d (2 pi)^{d/2}) * sum_i exp(-||x - x_i||^2 / (2 h^2))``
+
+    on the training rows and scores each query by its **negative log
+    density** ``-log p(x)``, so **higher scores are more anomalous**. The
+    log-sum-exp trick keeps scores finite even far from the data.
+
+    ``bandwidth`` is either ``"scott"`` (``n^{-1/(d+4)}``), ``"silverman"``
+    (``(n (d+2) / 4)^{-1/(d+4)}``) or a positive float. When
+    ``standardize=True`` (default) features are z-scored with the training
+    mean/std first, so the rule-of-thumb bandwidths are scale-free; the
+    density is still reported in the standardised space. Scoring the
+    training matrix itself uses a leave-one-out estimate (each row is
+    excluded from its own density) so training points are not flattered by
+    their own kernel. ``seed`` is accepted only for API symmetry; the model
+    is deterministic.
+    """
+
+    _RULES = ("scott", "silverman")
+
+    def __init__(
+        self,
+        bandwidth="scott",
+        standardize: bool = True,
+        seed: Optional[int] = None,
+    ) -> None:
+        if isinstance(bandwidth, str):
+            if bandwidth not in self._RULES:
+                raise ValueError(
+                    "bandwidth must be 'scott', 'silverman' or a positive float"
+                )
+        else:
+            if isinstance(bandwidth, bool):
+                raise ValueError(
+                    "bandwidth must be 'scott', 'silverman' or a positive float"
+                )
+            bandwidth = float(bandwidth)
+            if not np.isfinite(bandwidth) or bandwidth <= 0.0:
+                raise ValueError("bandwidth must be a positive finite float")
+        self.bandwidth = bandwidth
+        self.standardize = bool(standardize)
+        self.seed = seed
+        self.scores_: Optional[np.ndarray] = None
+        self.bandwidth_: Optional[float] = None
+        self.mean_: Optional[np.ndarray] = None
+        self.scale_: Optional[np.ndarray] = None
+        self._X_train: Optional[np.ndarray] = None
+        self._Z_train: Optional[np.ndarray] = None
+        self._n_features: Optional[int] = None
+
+    def _transform(self, X: np.ndarray) -> np.ndarray:
+        return (X - self.mean_) / self.scale_
+
+    def fit(self, X: np.ndarray) -> "KDE":
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array of shape (n_samples, n_features)")
+        n, d = X.shape
+        if n < 2:
+            raise ValueError("KDE needs at least two samples")
+        if d < 1:
+            raise ValueError("KDE needs at least one feature")
+        if not np.all(np.isfinite(X)):
+            raise ValueError("X must contain only finite values")
+        if self.standardize:
+            mean = X.mean(axis=0)
+            scale = X.std(axis=0)
+            scale = np.where(scale > 0.0, scale, 1.0)
+        else:
+            mean = np.zeros(d)
+            scale = np.ones(d)
+        self.mean_ = mean
+        self.scale_ = scale
+        self._X_train = np.array(X, dtype=float, copy=True)
+        self._Z_train = self._transform(self._X_train)
+        self._n_features = d
+        if isinstance(self.bandwidth, str):
+            factor = _kde_bandwidth_factor(self.bandwidth, n, d)
+            if self.standardize:
+                h = factor
+            else:
+                # Use the mean per-feature std as the reference scale.
+                h = factor * float(np.mean(X.std(axis=0)))
+                if not h > 0.0:
+                    h = factor
+        else:
+            h = float(self.bandwidth)
+        self.bandwidth_ = float(h)
+        return self
+
+    def _neg_log_density(self, Z: np.ndarray, exclude_self: bool) -> np.ndarray:
+        ref = self._Z_train
+        n_ref, d = ref.shape
+        h = self.bandwidth_
+        sq = _euclidean_distances(Z, ref) ** 2
+        logk = -sq / (2.0 * h * h)
+        if exclude_self:
+            np.fill_diagonal(logk, -np.inf)
+            n_eff = n_ref - 1
+        else:
+            n_eff = n_ref
+        mx = np.max(logk, axis=1, keepdims=True)
+        lse = mx[:, 0] + np.log(np.sum(np.exp(logk - mx), axis=1))
+        log_norm = math.log(n_eff) + d * math.log(h) + 0.5 * d * math.log(2.0 * math.pi)
+        return log_norm - lse
+
+    def score_samples(self, X: np.ndarray) -> np.ndarray:
+        if self._Z_train is None:
+            raise ValueError("KDE must be fitted before scoring")
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array of shape (n_samples, n_features)")
+        if X.shape[1] != self._n_features:
+            raise ValueError(
+                f"X has {X.shape[1]} features, but KDE was fitted on {self._n_features}"
+            )
+        if not np.all(np.isfinite(X)):
+            raise ValueError("X must contain only finite values")
+        same_train = (
+            X.shape == self._X_train.shape and np.array_equal(X, self._X_train)
+        )
+        self.scores_ = self._neg_log_density(self._transform(X), exclude_self=same_train)
         return self.scores_
 
     def predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
