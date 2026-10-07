@@ -1,6 +1,6 @@
 """Model-based anomaly detectors.
 
-Fifteen dependency-free models:
+Sixteen dependency-free models:
 
 * :class:`IsolationForest` -- random feature + random split-point trees with
   path-length anomaly scoring (higher score = more anomalous).
@@ -37,6 +37,9 @@ Fifteen dependency-free models:
 * :class:`KDE` -- Gaussian kernel density estimation: negative log density
   under a Scott/Silverman/fixed-bandwidth isotropic KDE, leave-one-out on
   the training rows (higher = more anomalous).
+* :class:`SOS` -- stochastic outlier selection: perplexity-tuned affinities
+  and binding probabilities whose product yields an outlier probability
+  (higher = more anomalous).
 
 All expose the same interface: ``fit``, ``score_samples(X)`` returning
 continuous anomaly scores, and ``fit_predict(X, contamination=...)``
@@ -2152,6 +2155,153 @@ class KDE:
         )
         self.scores_ = self._neg_log_density(self._transform(X), exclude_self=same_train)
         return self.scores_
+
+    def predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
+        return _flags_from_contamination(self.score_samples(X), contamination)
+
+    def fit_predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
+        return self.fit(X).predict(X, contamination=contamination)
+
+
+def _sos_affinities(distances: np.ndarray, perplexity: float) -> np.ndarray:
+    """Row-wise Gaussian affinities with binary-search bandwidths (perplexity)."""
+    n = distances.shape[0]
+    affinities = np.zeros((n, n), dtype=float)
+    target = float(np.log(perplexity))
+    for i in range(n):
+        d2 = distances[i] ** 2
+        d2[i] = np.inf
+        # Binary search for beta = 1/(2 sigma^2)
+        beta_lo, beta_hi = 1e-10, 1e10
+        beta = 1.0
+        for _ in range(64):
+            logk = -beta * d2
+            mx = np.max(logk[np.isfinite(logk)]) if np.any(np.isfinite(logk)) else 0.0
+            k = np.exp(logk - mx)
+            k[i] = 0.0
+            dens = float(k.sum())
+            if dens <= 0.0 or not np.isfinite(dens):
+                beta_hi = beta
+                beta = 0.5 * (beta_lo + beta)
+                continue
+            p = k / dens
+            entropy = -float(np.sum(p * np.log(np.maximum(p, 1e-12))))
+            if abs(entropy - target) < 1e-5:
+                affinities[i] = p
+                break
+            if entropy > target:
+                beta_lo = beta
+            else:
+                beta_hi = beta
+            beta = 0.5 * (beta_lo + beta_hi)
+        else:
+            logk = -beta * d2
+            mx = np.max(logk[np.isfinite(logk)]) if np.any(np.isfinite(logk)) else 0.0
+            k = np.exp(logk - mx)
+            k[i] = 0.0
+            dens = float(k.sum())
+            affinities[i] = k / dens if dens > 0 else 0.0
+    return affinities
+
+
+class SOS:
+    """Stochastic Outlier Selection (Janssens, Huszár, Postma, van den Herik).
+
+    Each point adapts a Gaussian bandwidth so its neighbour distribution has a
+    target perplexity. Binding probabilities are the column-normalised
+    affinities; the outlier probability of a point is the product over others
+    of ``(1 - binding_ji)``. Higher scores are more anomalous.
+    """
+
+    def __init__(self, perplexity: float = 30.0) -> None:
+        if not np.isfinite(perplexity) or perplexity < 1.0:
+            raise ValueError("perplexity must be a finite number >= 1")
+        self.perplexity = float(perplexity)
+        self.scores_: Optional[np.ndarray] = None
+        self._X_train: Optional[np.ndarray] = None
+        self._affinities: Optional[np.ndarray] = None
+        self._n_features: Optional[int] = None
+
+    def fit(self, X: np.ndarray) -> "SOS":
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array of shape (n_samples, n_features)")
+        n, d = X.shape
+        if n < 3:
+            raise ValueError("SOS needs at least three samples")
+        if d < 1:
+            raise ValueError("SOS needs at least one feature")
+        if not np.all(np.isfinite(X)):
+            raise ValueError("X must contain only finite values")
+        max_perp = float(n - 1)
+        if self.perplexity > max_perp:
+            raise ValueError(
+                f"perplexity ({self.perplexity}) must be <= n_samples - 1 ({max_perp:g})"
+            )
+        distances = _euclidean_distances(X, X)
+        affinities = _sos_affinities(distances, self.perplexity)
+        # Outlier probability of i: product over j of (1 - a_ji), where a_ji is
+        # the row-stochastic affinity of j selecting i (Janssens et al.).
+        with np.errstate(divide="ignore"):
+            log_one_minus = np.log(np.maximum(1.0 - affinities, 1e-12))
+        np.fill_diagonal(log_one_minus, 0.0)
+        scores = np.exp(log_one_minus.sum(axis=0))
+        self._X_train = np.array(X, dtype=float, copy=True)
+        self._affinities = affinities
+        self._n_features = d
+        self.scores_ = scores
+        return self
+
+    def score_samples(self, X: np.ndarray) -> np.ndarray:
+        if self._X_train is None or self.scores_ is None:
+            raise ValueError("SOS must be fitted before scoring")
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array of shape (n_samples, n_features)")
+        if X.shape[1] != self._n_features:
+            raise ValueError(
+                f"X has {X.shape[1]} features, but SOS was fitted on {self._n_features}"
+            )
+        if not np.all(np.isfinite(X)):
+            raise ValueError("X must contain only finite values")
+        if X.shape == self._X_train.shape and np.array_equal(X, self._X_train):
+            return self.scores_
+        # For held-out points, recompute affinities against the training set
+        # only (transductive-style extension): treat train rows as neighbours.
+        train = self._X_train
+        n_train = train.shape[0]
+        d_query = _euclidean_distances(X, train)
+        # Use the mean training bandwidth proxy via a fixed perplexity on train.
+        # Approximate: for each query, find beta so neighbour entropy matches.
+        scores = np.empty(X.shape[0], dtype=float)
+        target = float(np.log(min(self.perplexity, n_train)))
+        for i in range(X.shape[0]):
+            d2 = d_query[i] ** 2
+            beta_lo, beta_hi = 1e-10, 1e10
+            beta = 1.0
+            for _ in range(64):
+                logk = -beta * d2
+                mx = float(np.max(logk))
+                k = np.exp(logk - mx)
+                dens = float(k.sum())
+                if dens <= 0.0:
+                    beta_hi = beta
+                    beta = 0.5 * (beta_lo + beta)
+                    continue
+                p = k / dens
+                entropy = -float(np.sum(p * np.log(np.maximum(p, 1e-12))))
+                if abs(entropy - target) < 1e-5:
+                    break
+                if entropy > target:
+                    beta_lo = beta
+                else:
+                    beta_hi = beta
+                beta = 0.5 * (beta_lo + beta_hi)
+            # Binding from train to query is proportional to affinity; without
+            # other queries we use the affinity mass as a soft inlier score.
+            affinity_mass = float(np.exp(np.logaddexp.reduce(-beta * d2)))
+            scores[i] = float(np.exp(-affinity_mass))
+        return scores
 
     def predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
         return _flags_from_contamination(self.score_samples(X), contamination)

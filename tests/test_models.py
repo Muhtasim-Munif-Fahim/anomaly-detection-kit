@@ -1503,3 +1503,36 @@ class TestKDE:
             model.score_samples(np.zeros((5, 4)))
         with pytest.raises(ValueError):
             model.score_samples(np.array([[np.inf, 0.0, 0.0]]))
+
+
+class TestSOS:
+    def test_outliers_score_higher_than_inliers(self):
+        X, y = g.make_tabular(120, 3, 2, contamination=0.1, outlier_types="shift", seed=11)
+        sos = m.SOS(perplexity=10.0).fit(X)
+        s = sos.score_samples(X)
+        assert s[y == 1].mean() > s[y == 0].mean()
+
+    def test_predict_flags_exact_contamination(self):
+        X, _ = g.make_tabular(100, 3, 2, contamination=0.1, seed=12)
+        flags = m.SOS(perplexity=8.0).fit_predict(X, contamination=0.1)
+        assert flags.sum() == 10
+
+    def test_scores_in_unit_interval(self):
+        X, _ = g.make_tabular(80, 2, 2, contamination=0.05, seed=13)
+        s = m.SOS(perplexity=5.0).fit(X).score_samples(X)
+        assert s.min() >= 0.0 and s.max() <= 1.0 + 1e-9
+
+    def test_rejects_bad_perplexity(self):
+        X, _ = g.make_tabular(40, 2, 2, contamination=0.05, seed=14)
+        with pytest.raises(ValueError):
+            m.SOS(perplexity=0.5)
+        with pytest.raises(ValueError):
+            m.SOS(perplexity=100.0).fit(X)
+
+    def test_held_out_scoring_shape(self):
+        X, _ = g.make_tabular(60, 2, 2, contamination=0.05, seed=15)
+        sos = m.SOS(perplexity=5.0).fit(X)
+        Y = X[:10] + 0.01
+        s = sos.score_samples(Y)
+        assert s.shape == (10,)
+        assert np.all(np.isfinite(s))
