@@ -2,7 +2,7 @@
 
 A small, dependency-light toolkit for **unsupervised anomaly / outlier
 detection** in tabular data and time series. It ships classical statistical
-baselines (z-score, median/MAD, IQR fences, generalized ESD) and fifteen
+baselines (z-score, median/MAD, IQR fences, generalized ESD) and sixteen
 self-contained models (isolation forest, local outlier factor, k-nearest
 neighbours, COPOD, ECOD, HBOS, one-class SVM, EllipticEnvelope / FAST-MCD,
 CBLOF, LODA, ABOD, COF, SOD, PCA, KDE), plus a seeded synthetic-data generator,
@@ -42,7 +42,9 @@ readable and easy to extend.
   (reconstruction-error outlier detector via squared L2 residual after a low-rank
   PCA projection; higher = more anomalous), and KDE (Gaussian kernel density
   estimation scored by negative log density with Scott/Silverman/fixed
-  bandwidth and leave-one-out training scores; higher = more anomalous).
+  bandwidth and leave-one-out training scores; higher = more anomalous), and SOS
+  (stochastic outlier selection via perplexity-tuned affinities and binding
+  probabilities; higher = more anomalous).
 - **Evaluation** — precision / recall / F1, rank-based ROC-AUC, threshold
   sweep with best-F1 selection, and a comparison table across detectors.
 - **Reports** — markdown renderer with per-detector score summaries, top

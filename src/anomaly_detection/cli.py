@@ -37,11 +37,12 @@ from .models import (
     SOD,
     PCA,
     KDE,
+    SOS,
     _flags_from_contamination,
 )
 
 STATISTICAL_ALIASES = {"zscore": "z-score", "mad": "modified z-score", "iqr": "IQR"}
-MODEL_NAMES = ["isolation_forest", "lof", "copod", "ecod", "hbos", "knn", "ocsvm", "elliptic", "cblof", "loda", "abod", "cof", "sod", "pca", "kde"]
+MODEL_NAMES = ["isolation_forest", "lof", "copod", "ecod", "hbos", "knn", "ocsvm", "elliptic", "cblof", "loda", "abod", "cof", "sod", "pca", "kde", "sos"]
 DETECTOR_NAMES = MODEL_NAMES + list(STATISTICAL_ALIASES)
 
 
@@ -76,6 +77,8 @@ def _detector_scores(name: str, X: np.ndarray, seed: Optional[int]) -> np.ndarra
         return PCA().fit(X).score_samples(X)
     if name == "kde":
         return KDE().fit(X).score_samples(X)
+    if name == "sos":
+        return SOS(perplexity=min(30.0, max(1.0, X.shape[0] - 1))).fit(X).score_samples(X)
     return STATISTICAL_SCORERS[STATISTICAL_ALIASES[name]](X)
 
 
