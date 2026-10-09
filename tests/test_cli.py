@@ -195,6 +195,7 @@ class TestParser:
             "pca",
             "kde",
             "sos",
+            "gmm",
             "zscore",
             "mad",
             "iqr",
