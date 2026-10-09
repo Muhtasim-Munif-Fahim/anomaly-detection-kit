@@ -1,6 +1,6 @@
 """Model-based anomaly detectors.
 
-Sixteen dependency-free models:
+Seventeen dependency-free models:
 
 * :class:`IsolationForest` -- random feature + random split-point trees with
   path-length anomaly scoring (higher score = more anomalous).
@@ -40,6 +40,8 @@ Sixteen dependency-free models:
 * :class:`SOS` -- stochastic outlier selection: perplexity-tuned affinities
   and binding probabilities whose product yields an outlier probability
   (higher = more anomalous).
+* :class:`GMM` -- Gaussian mixture model: negative log-likelihood under a
+  fitted diagonal-covariance EM mixture (higher = more anomalous).
 
 All expose the same interface: ``fit``, ``score_samples(X)`` returning
 continuous anomaly scores, and ``fit_predict(X, contamination=...)``
@@ -2302,6 +2304,203 @@ class SOS:
             affinity_mass = float(np.exp(np.logaddexp.reduce(-beta * d2)))
             scores[i] = float(np.exp(-affinity_mass))
         return scores
+
+    def predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
+        return _flags_from_contamination(self.score_samples(X), contamination)
+
+    def fit_predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
+        return self.fit(X).predict(X, contamination=contamination)
+
+
+
+def _gmm_kmeans_init(
+    X: np.ndarray, n_components: int, rng: np.random.Generator
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """K-means++ style init for mixture weights, means, and diagonal vars."""
+    n, d = X.shape
+    # First centre random; subsequent by squared distance.
+    centres = np.empty((n_components, d), dtype=float)
+    centres[0] = X[int(rng.integers(0, n))]
+    closest = np.full(n, np.inf)
+    for k in range(1, n_components):
+        dist2 = ((X - centres[k - 1]) ** 2).sum(axis=1)
+        closest = np.minimum(closest, dist2)
+        total = float(closest.sum())
+        if total <= 0.0:
+            centres[k] = X[int(rng.integers(0, n))]
+        else:
+            probs = closest / total
+            centres[k] = X[int(rng.choice(n, p=probs))]
+    # Assign and form diagonal variances.
+    dist2 = ((X[:, None, :] - centres[None, :, :]) ** 2).sum(axis=2)
+    labels = dist2.argmin(axis=1)
+    weights = np.zeros(n_components, dtype=float)
+    means = centres.copy()
+    vars_ = np.ones((n_components, d), dtype=float)
+    for k in range(n_components):
+        mask = labels == k
+        count = int(mask.sum())
+        if count == 0:
+            weights[k] = 1.0 / n_components
+            continue
+        weights[k] = count / n
+        means[k] = X[mask].mean(axis=0)
+        # Bessel-corrected diagonal variance with floor.
+        if count > 1:
+            vars_[k] = X[mask].var(axis=0, ddof=1)
+        else:
+            vars_[k] = X.var(axis=0, ddof=1)
+    weights = np.maximum(weights, 1e-12)
+    weights /= weights.sum()
+    global_var = np.maximum(X.var(axis=0, ddof=1), 1e-6)
+    vars_ = np.maximum(vars_, 1e-6 * global_var)
+    return weights, means, vars_
+
+
+def _gmm_log_gauss_diag(
+    X: np.ndarray, mean: np.ndarray, var: np.ndarray
+) -> np.ndarray:
+    """Log density of diagonal Gaussians: shape (n_samples, n_components)."""
+    # X: (n, d), mean/var: (k, d)
+    log_det = np.log(var).sum(axis=1)  # (k,)
+    inv = 1.0 / var
+    # Mahalanobis: sum_d (x_d - m_d)^2 / v_d
+    diff = X[:, None, :] - mean[None, :, :]
+    maha = (diff * diff * inv[None, :, :]).sum(axis=2)
+    d = X.shape[1]
+    return -0.5 * (d * np.log(2.0 * np.pi) + log_det[None, :] + maha)
+
+
+def _logsumexp(a: np.ndarray, axis: int = 1) -> np.ndarray:
+    m = np.max(a, axis=axis, keepdims=True)
+    return (m + np.log(np.exp(a - m).sum(axis=axis, keepdims=True))).squeeze(axis)
+
+
+class GMM:
+    """Gaussian mixture model outlier detector (diagonal EM).
+
+    Fits a ``n_components``-Gaussian mixture with diagonal covariances by
+    expectation-maximisation (Dempster et al., 1977; Bishop, PRML Ch. 9).
+    The anomaly score of a row is its **negative log-likelihood** under the
+    fitted mixture, so higher scores are more anomalous. Training scores use
+    the fitted density directly (not leave-one-out).
+
+    Parameters
+    ----------
+    n_components:
+        Number of mixture components (>= 1).
+    max_iter:
+        Maximum EM iterations.
+    tol:
+        Relative improvement in average log-likelihood that stops EM.
+    reg_covar:
+        Floor added to each diagonal variance for numerical stability.
+    seed:
+        RNG seed for k-means++ style initialisation.
+    """
+
+    def __init__(
+        self,
+        n_components: int = 3,
+        max_iter: int = 100,
+        tol: float = 1e-4,
+        reg_covar: float = 1e-6,
+        seed: int = 0,
+    ) -> None:
+        if not isinstance(n_components, int) or n_components < 1:
+            raise ValueError("n_components must be a positive integer")
+        if not isinstance(max_iter, int) or max_iter < 1:
+            raise ValueError("max_iter must be a positive integer")
+        if not np.isfinite(tol) or tol < 0.0:
+            raise ValueError("tol must be a finite non-negative number")
+        if not np.isfinite(reg_covar) or reg_covar <= 0.0:
+            raise ValueError("reg_covar must be a positive finite number")
+        self.n_components = int(n_components)
+        self.max_iter = int(max_iter)
+        self.tol = float(tol)
+        self.reg_covar = float(reg_covar)
+        self.seed = int(seed)
+        self.weights_: Optional[np.ndarray] = None
+        self.means_: Optional[np.ndarray] = None
+        self.variances_: Optional[np.ndarray] = None
+        self.n_iter_: Optional[int] = None
+        self.lower_bound_: Optional[float] = None
+        self.scores_: Optional[np.ndarray] = None
+        self._n_features: Optional[int] = None
+
+    def fit(self, X: np.ndarray) -> "GMM":
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array of shape (n_samples, n_features)")
+        n, d = X.shape
+        if n < self.n_components:
+            raise ValueError(
+                f"GMM needs at least n_components ({self.n_components}) samples, got {n}"
+            )
+        if d < 1:
+            raise ValueError("GMM needs at least one feature")
+        if not np.all(np.isfinite(X)):
+            raise ValueError("X must contain only finite values")
+
+        rng = np.random.default_rng(self.seed)
+        weights, means, vars_ = _gmm_kmeans_init(X, self.n_components, rng)
+        vars_ = np.maximum(vars_, self.reg_covar)
+        prev_ll = -np.inf
+        n_iter = 0
+
+        for n_iter in range(1, self.max_iter + 1):
+            # E-step
+            log_resp = np.log(weights)[None, :] + _gmm_log_gauss_diag(X, means, vars_)
+            log_norm = _logsumexp(log_resp, axis=1)
+            resp = np.exp(log_resp - log_norm[:, None])
+            ll = float(log_norm.mean())
+
+            # M-step
+            nk = resp.sum(axis=0) + 1e-12
+            weights = nk / n
+            means = (resp.T @ X) / nk[:, None]
+            # Diagonal variances: E[(x - mu)^2]
+            vars_ = np.empty_like(means)
+            for k in range(self.n_components):
+                diff = X - means[k]
+                vars_[k] = (resp[:, k][:, None] * (diff * diff)).sum(axis=0) / nk[k]
+            vars_ = np.maximum(vars_, self.reg_covar)
+
+            if abs(ll - prev_ll) <= self.tol * (abs(prev_ll) + 1e-12):
+                prev_ll = ll
+                break
+            prev_ll = ll
+
+        self.weights_ = weights
+        self.means_ = means
+        self.variances_ = vars_
+        self.n_iter_ = n_iter
+        self.lower_bound_ = prev_ll
+        self._n_features = d
+        self.scores_ = -_logsumexp(
+            np.log(weights)[None, :] + _gmm_log_gauss_diag(X, means, vars_),
+            axis=1,
+        )
+        return self
+
+    def score_samples(self, X: np.ndarray) -> np.ndarray:
+        if self.weights_ is None or self.means_ is None or self.variances_ is None:
+            raise ValueError("GMM must be fitted before scoring")
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array of shape (n_samples, n_features)")
+        if X.shape[1] != self._n_features:
+            raise ValueError(
+                f"X has {X.shape[1]} features, but GMM was fitted on {self._n_features}"
+            )
+        if not np.all(np.isfinite(X)):
+            raise ValueError("X must contain only finite values")
+        log_dens = _logsumexp(
+            np.log(self.weights_)[None, :]
+            + _gmm_log_gauss_diag(X, self.means_, self.variances_),
+            axis=1,
+        )
+        return -log_dens
 
     def predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
         return _flags_from_contamination(self.score_samples(X), contamination)

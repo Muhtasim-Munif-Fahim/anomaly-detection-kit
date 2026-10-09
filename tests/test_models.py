@@ -1536,3 +1536,95 @@ class TestSOS:
         s = sos.score_samples(Y)
         assert s.shape == (10,)
         assert np.all(np.isfinite(s))
+
+
+class TestGMM:
+    def test_shape_and_finite(self):
+        X, _ = g.make_tabular(200, 4, 3, contamination=0.05, seed=801)
+        s = m.GMM(n_components=3, seed=0).fit(X).score_samples(X)
+        assert s.shape == (200,)
+        assert np.all(np.isfinite(s))
+
+    def test_attributes_after_fit(self):
+        X, _ = g.make_tabular(120, 3, 2, contamination=0.05, seed=802)
+        model = m.GMM(n_components=2, seed=1).fit(X)
+        assert model.weights_.shape == (2,)
+        assert model.means_.shape == (2, 3)
+        assert model.variances_.shape == (2, 3)
+        assert abs(model.weights_.sum() - 1.0) < 1e-6
+        assert model.n_iter_ >= 1
+        assert np.isfinite(model.lower_bound_)
+
+    def test_single_component_matches_gaussian_nll(self):
+        rng = np.random.default_rng(0)
+        X = rng.normal(size=(80, 2))
+        model = m.GMM(n_components=1, seed=0, max_iter=50).fit(X)
+        # Manual NLL under fitted diagonal Gaussian
+        mean = model.means_[0]
+        var = model.variances_[0]
+        diff = X - mean
+        maha = (diff * diff / var).sum(axis=1)
+        log_det = np.log(var).sum()
+        nll = 0.5 * (2 * np.log(2 * np.pi) + log_det + maha)
+        assert np.allclose(model.score_samples(X), nll, rtol=1e-5, atol=1e-5)
+
+    def test_outliers_score_higher(self):
+        X, y = g.make_tabular(
+            400, 4, 3, contamination=0.05, outlier_types="shift", seed=803
+        )
+        s = m.GMM(n_components=3, seed=0).fit(X).score_samples(X)
+        assert s[y == 1].mean() > s[y == 0].mean()
+
+    def test_flags_obvious_outlier(self):
+        rng = np.random.default_rng(0)
+        X = rng.normal(size=(300, 2))
+        X[0] = [10.0, -10.0]
+        flags = m.GMM(n_components=2, seed=0).fit(X).predict(X, contamination=0.01)
+        assert flags[0] == 1
+
+    def test_contamination_predict(self):
+        X, _ = g.make_tabular(150, 3, 2, contamination=0.05, seed=804)
+        flags = m.GMM(n_components=2, seed=0).fit(X).predict(X, contamination=0.1)
+        assert set(np.unique(flags)).issubset({0, 1})
+        assert int(flags.sum()) == 15
+
+    def test_fit_predict_matches_predict(self):
+        X, _ = g.make_tabular(80, 3, 2, contamination=0.05, seed=805)
+        model = m.GMM(n_components=2, seed=0)
+        assert np.array_equal(
+            model.fit(X).predict(X, contamination=0.1),
+            model.fit_predict(X, contamination=0.1),
+        )
+
+    def test_deterministic(self):
+        X, _ = g.make_tabular(100, 3, 2, contamination=0.05, seed=806)
+        s1 = m.GMM(n_components=3, seed=7).fit(X).score_samples(X)
+        s2 = m.GMM(n_components=3, seed=7).fit(X).score_samples(X)
+        assert np.array_equal(s1, s2)
+
+    def test_held_out_scoring(self):
+        X, _ = g.make_tabular(100, 3, 2, contamination=0.05, seed=807)
+        model = m.GMM(n_components=2, seed=0).fit(X)
+        Q = X[:10] + 0.05
+        s = model.score_samples(Q)
+        assert s.shape == (10,)
+        assert np.all(np.isfinite(s))
+
+    def test_invalid_n_components_raises(self):
+        with pytest.raises(ValueError, match="n_components"):
+            m.GMM(n_components=0)
+
+    def test_too_few_samples_raises(self):
+        X = np.zeros((2, 3))
+        with pytest.raises(ValueError, match="n_components"):
+            m.GMM(n_components=3, seed=0).fit(X)
+
+    def test_score_before_fit_raises(self):
+        with pytest.raises(ValueError):
+            m.GMM().score_samples(np.zeros((5, 2)))
+
+    def test_feature_mismatch_raises(self):
+        X = np.random.default_rng(0).normal(size=(40, 3))
+        model = m.GMM(n_components=2, seed=0).fit(X)
+        with pytest.raises(ValueError, match="features"):
+            model.score_samples(np.zeros((5, 4)))
