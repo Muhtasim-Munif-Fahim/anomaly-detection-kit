@@ -2,10 +2,10 @@
 
 A small, dependency-light toolkit for **unsupervised anomaly / outlier
 detection** in tabular data and time series. It ships classical statistical
-baselines (z-score, median/MAD, IQR fences, generalized ESD) and sixteen
+baselines (z-score, median/MAD, IQR fences, generalized ESD) and seventeen
 self-contained models (isolation forest, local outlier factor, k-nearest
 neighbours, COPOD, ECOD, HBOS, one-class SVM, EllipticEnvelope / FAST-MCD,
-CBLOF, LODA, ABOD, COF, SOD, PCA, KDE), plus a seeded synthetic-data generator,
+CBLOF, LODA, ABOD, COF, SOD, PCA, KDE, SOS, GMM), plus a seeded synthetic-data generator,
 evaluation metrics, and a markdown report renderer — all built on
 **numpy only** (no scipy, no sklearn).
 
@@ -44,12 +44,31 @@ readable and easy to extend.
   estimation scored by negative log density with Scott/Silverman/fixed
   bandwidth and leave-one-out training scores; higher = more anomalous), and SOS
   (stochastic outlier selection via perplexity-tuned affinities and binding
-  probabilities; higher = more anomalous).
+  probabilities; higher = more anomalous), and GMM
+  (diagonal-covariance Gaussian mixture via EM; anomaly score is negative
+  log-likelihood under the fitted mixture; higher = more anomalous).
 - **Evaluation** — precision / recall / F1, rank-based ROC-AUC, threshold
   sweep with best-F1 selection, and a comparison table across detectors.
 - **Reports** — markdown renderer with per-detector score summaries, top
   flagged rows, sweep tables and caveats.
 - **CLI** — `simulate`, `detect`, `evaluate`, `report` subcommands.
+
+
+## GMM (Gaussian mixture)
+
+`GMM` fits a diagonal-covariance Gaussian mixture with EM and scores each
+row by its **negative log-likelihood** under that mixture (higher = more
+anomalous). It sits next to KDE as a parametric density baseline: KDE is
+nonparametric and single-mode-friendly; GMM captures multi-modal inliers.
+
+```python
+from anomaly_detection.models import GMM
+from anomaly_detection.generators import make_tabular
+
+X, y = make_tabular(n_samples=400, contamination=0.05, seed=0)
+scores = GMM(n_components=3, seed=0).fit(X).score_samples(X)
+assert scores[y == 1].mean() > scores[y == 0].mean()
+```
 
 ## Installation
 
@@ -66,7 +85,7 @@ pip install -e .        # optional, exposes the `anomaly-detect` command
 
 ```python
 from anomaly_detection.generators import make_tabular
-from anomaly_detection.models import ABOD, CBLOF, COF, COPOD, ECOD, EllipticEnvelope, HBOS, IsolationForest, KDE, KNN, LODA, OneClassSVM, PCA, SOD
+from anomaly_detection.models import ABOD, CBLOF, COF, COPOD, ECOD, EllipticEnvelope, GMM, HBOS, IsolationForest, KDE, KNN, LODA, OneClassSVM, PCA, SOD, SOS
 from anomaly_detection.evaluate import compare_detectors
 
 X, y_true = make_tabular(n_samples=600, contamination=0.05, seed=7)
@@ -86,6 +105,7 @@ detectors = {
     "SOD": SOD(n_neighbors=20).fit(X).score_samples,
     "PCA": PCA(n_components=0.95).fit(X).score_samples,
     "KDE": KDE(bandwidth="scott").fit(X).score_samples,
+    "GMM": GMM(n_components=3, seed=0).fit(X).score_samples,
 }
 rows = compare_detectors(X, y_true, detectors, contamination=0.05)
 print(rows[0]["f1"], rows[0]["auc"])
@@ -173,6 +193,7 @@ Or without installing: `python -m anomaly_detection <command> ...`.
 | SOD               | model         | higher = more anomalous                | `n_neighbors`, `alpha`      |
 | PCA               | model         | higher = more anomalous                | `n_components`              |
 | KDE               | model         | higher = more anomalous                | `bandwidth`, `standardize`  |
+| GMM               | model         | higher = more anomalous                | `n_components`, `seed`      |
 | z-score           | statistical   | max abs z per row                       | `threshold` (default 3.0)   |
 | Modified z-score  | statistical   | median/MAD robust z                    | `threshold` (default 3.5)   |
 | IQR fences        | statistical   | distance beyond fence / IQR            | `k` (default 1.5)           |
@@ -184,7 +205,7 @@ Or without installing: `python -m anomaly_detection <command> ...`.
 src/anomaly_detection/
 ├── generators.py   # seeded synthetic data (tabular + time series)
 ├── classic.py      # statistical baselines incl. GESD
-├── models.py       # isolation forest, LOF, kNN, COPOD, ECOD, HBOS, one-class SVM, EllipticEnvelope, CBLOF, LODA, ABOD, COF, SOD, PCA, KDE
+├── models.py       # isolation forest, LOF, kNN, COPOD, ECOD, HBOS, one-class SVM, EllipticEnvelope, CBLOF, LODA, ABOD, COF, SOD, PCA, KDE, SOS, GMM
 ├── evaluate.py     # metrics, threshold sweep, comparison
 ├── report.py       # markdown rendering
 └── cli.py          # command line interface
