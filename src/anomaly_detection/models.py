@@ -1,6 +1,6 @@
 """Model-based anomaly detectors.
 
-Seventeen dependency-free models:
+Eighteen dependency-free models:
 
 * :class:`IsolationForest` -- random feature + random split-point trees with
   path-length anomaly scoring (higher score = more anomalous).
@@ -42,6 +42,9 @@ Seventeen dependency-free models:
   (higher = more anomalous).
 * :class:`GMM` -- Gaussian mixture model: negative log-likelihood under a
   fitted diagonal-covariance EM mixture (higher = more anomalous).
+* :class:`INNE` -- isolation using nearest-neighbour ensembles: adaptive
+  hyperspheres around small random subsamples, scored by the covering
+  sphere's radius ratio to its neighbour's (higher = more anomalous).
 
 All expose the same interface: ``fit``, ``score_samples(X)`` returning
 continuous anomaly scores, and ``fit_predict(X, contamination=...)``
@@ -2501,6 +2504,135 @@ class GMM:
             axis=1,
         )
         return -log_dens
+
+    def predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
+        return _flags_from_contamination(self.score_samples(X), contamination)
+
+    def fit_predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
+        return self.fit(X).predict(X, contamination=contamination)
+
+
+def _inne_fit_subsample(sample: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Hypersphere radii and nearest-neighbour ratios for one INNE subsample.
+
+    Every centre ``c`` gets radius ``tau(c)``, the distance to its nearest
+    other centre ``eta(c)``. Its isolation ratio is
+    ``1 - tau(eta(c)) / tau(c)``. The ratio is near 0 when the centre's
+    neighbour is about as isolated as the centre, and near 1 when the
+    centre sits much further out than its neighbour.
+    """
+    dist = _euclidean_distances(sample, sample)
+    np.fill_diagonal(dist, np.inf)
+    nn = np.argmin(dist, axis=1)
+    radius = dist[np.arange(sample.shape[0]), nn]
+    tiny = np.finfo(float).tiny
+    ratio = 1.0 - (radius[nn] + tiny) / (radius + tiny)
+    return radius, ratio
+
+
+def _inne_score_subsample(
+    X: np.ndarray, centres: np.ndarray, radius: np.ndarray, ratio: np.ndarray
+) -> np.ndarray:
+    """Isolation score of each row of ``X`` against one fitted subsample.
+
+    A row covered by at least one hypersphere takes the ratio of the
+    covering centre with the **smallest** radius. A row outside every
+    hypersphere is fully isolated and scores 1.
+    """
+    dist = _euclidean_distances(X, centres)
+    covered = dist <= radius[None, :]
+    masked = np.where(covered, radius[None, :], np.inf)
+    cnn = np.argmin(masked, axis=1)
+    inside = np.isfinite(masked[np.arange(X.shape[0]), cnn])
+    return np.where(inside, ratio[cnn], 1.0)
+
+
+class INNE:
+    """Isolation using Nearest-Neighbour Ensembles (Bandaragoda et al., 2018).
+
+    INNE builds ``n_estimators`` random subsamples of ``max_samples`` rows.
+    In each subsample, every row is the centre of a hypersphere whose
+    radius is the distance to its nearest neighbour in that subsample.
+    A query point is scored by the smallest hypersphere that covers it, as
+    ``1 - tau(eta(c)) / tau(c)`` (``c`` the covering centre, ``eta(c)``
+    its nearest neighbour, ``tau`` the radius). A point outside every
+    hypersphere scores 1. The final score is the mean over the ensemble,
+    in ``[0, 1]``. Higher scores are more anomalous.
+
+    Hyperspheres adapt to local density, so INNE handles clustered
+    anomalies and varying-density inliers that axis-parallel isolation
+    trees miss. Each estimator costs ``O(psi^2)`` to fit and ``O(n psi)`` to
+    score, with ``psi = max_samples``.
+
+    Parameters
+    ----------
+    n_estimators:
+        Number of subsamples in the ensemble.
+    max_samples:
+        Subsample size ``psi`` (>= 2). The paper recommends small values;
+        the default 8 follows the reference implementation. Capped at the
+        number of training rows.
+    seed:
+        RNG seed for the subsampling.
+    """
+
+    def __init__(self, n_estimators: int = 200, max_samples: int = 8, seed: Optional[int] = 0) -> None:
+        if isinstance(n_estimators, bool) or not isinstance(n_estimators, (int, np.integer)) or n_estimators < 1:
+            raise ValueError("n_estimators must be a positive integer")
+        if isinstance(max_samples, bool) or not isinstance(max_samples, (int, np.integer)) or max_samples < 2:
+            raise ValueError("max_samples must be an integer >= 2")
+        self.n_estimators = int(n_estimators)
+        self.max_samples = int(max_samples)
+        self.seed = seed
+        self.estimators_: Optional[list] = None
+        self.max_samples_: Optional[int] = None
+        self.scores_: Optional[np.ndarray] = None
+        self._n_features: Optional[int] = None
+
+    def fit(self, X: np.ndarray) -> "INNE":
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array of shape (n_samples, n_features)")
+        n, d = X.shape
+        if n < 2:
+            raise ValueError("INNE needs at least two samples")
+        if d < 1:
+            raise ValueError("INNE needs at least one feature")
+        if not np.all(np.isfinite(X)):
+            raise ValueError("X must contain only finite values")
+        psi = min(self.max_samples, n)
+        rng = np.random.default_rng(self.seed)
+        estimators = []
+        for _ in range(self.n_estimators):
+            idx = rng.choice(n, size=psi, replace=False)
+            centres = X[idx].copy()
+            radius, ratio = _inne_fit_subsample(centres)
+            estimators.append((centres, radius, ratio))
+        self.estimators_ = estimators
+        self.max_samples_ = psi
+        self._n_features = d
+        self.scores_ = self._score(X)
+        return self
+
+    def _score(self, X: np.ndarray) -> np.ndarray:
+        total = np.zeros(X.shape[0], dtype=float)
+        for centres, radius, ratio in self.estimators_:
+            total += _inne_score_subsample(X, centres, radius, ratio)
+        return total / len(self.estimators_)
+
+    def score_samples(self, X: np.ndarray) -> np.ndarray:
+        if self.estimators_ is None:
+            raise ValueError("INNE must be fitted before scoring")
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array of shape (n_samples, n_features)")
+        if X.shape[1] != self._n_features:
+            raise ValueError(
+                f"X has {X.shape[1]} features, but INNE was fitted on {self._n_features}"
+            )
+        if not np.all(np.isfinite(X)):
+            raise ValueError("X must contain only finite values")
+        return self._score(X)
 
     def predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
         return _flags_from_contamination(self.score_samples(X), contamination)

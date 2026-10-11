@@ -196,6 +196,7 @@ class TestParser:
             "kde",
             "sos",
             "gmm",
+            "inne",
             "zscore",
             "mad",
             "iqr",
@@ -209,3 +210,12 @@ def test_detect_with_kde_runs(tmp_path):
     scores = cli._detector_scores("kde", X, seed=0)
     assert scores.shape == (40,)
     assert np.all(np.isfinite(scores))
+
+
+def test_detect_with_inne_runs():
+    import numpy as np
+
+    X = np.random.default_rng(1).normal(size=(50, 3))
+    scores = cli._detector_scores("inne", X, seed=0)
+    assert scores.shape == (50,)
+    assert np.all((scores >= 0.0) & (scores <= 1.0))
