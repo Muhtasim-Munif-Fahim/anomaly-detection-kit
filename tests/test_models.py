@@ -1628,3 +1628,86 @@ class TestGMM:
         model = m.GMM(n_components=2, seed=0).fit(X)
         with pytest.raises(ValueError, match="features"):
             model.score_samples(np.zeros((5, 4)))
+
+
+class TestINNE:
+    def test_hand_computed_subsample(self):
+        # Centres on a line at 0, 1, 3 and 10.
+        centres = np.array([[0.0], [1.0], [3.0], [10.0]])
+        radius, ratio = m._inne_fit_subsample(centres)
+        assert np.allclose(radius, [1.0, 1.0, 2.0, 7.0])
+        # ratio = 1 - tau(nn) / tau(c): nn(0)=1, nn(1)=0, nn(3)=1, nn(10)=3.
+        assert np.allclose(ratio, [0.0, 0.0, 0.5, 1.0 - 2.0 / 7.0])
+        queries = np.array([[0.5], [2.5], [8.0], [20.0]])
+        scores = m._inne_score_subsample(queries, centres, radius, ratio)
+        # 0.5 is covered by 0 and 1 (radius 1) -> ratio 0; 2.5 by 3 (radius 2)
+        # and 10 (radius 7) -> smallest is 3 -> 0.5; 8.0 only by 10; 20 by none.
+        assert np.allclose(scores, [0.0, 0.5, 1.0 - 2.0 / 7.0, 1.0])
+
+    def test_ratio_in_unit_interval_and_duplicates(self):
+        rng = np.random.default_rng(0)
+        sample = rng.normal(size=(16, 3))
+        sample[5] = sample[4]
+        radius, ratio = m._inne_fit_subsample(sample)
+        assert np.all(np.isfinite(ratio))
+        assert np.all((ratio >= 0.0) & (ratio < 1.0))
+        assert radius[4] == 0.0 and ratio[4] == 0.0
+
+    def test_scores_in_unit_range_and_shape(self):
+        X, _ = g.make_tabular(300, 4, 3, contamination=0.05, seed=901)
+        s = m.INNE(n_estimators=50, seed=1).fit(X).score_samples(X)
+        assert s.shape == (300,)
+        assert s.min() >= 0.0 and s.max() <= 1.0
+
+    def test_detects_shifted_outliers(self):
+        from anomaly_detection.evaluate import roc_auc
+
+        X, y = g.make_tabular(600, 4, 3, contamination=0.05, outlier_types="shift", seed=902)
+        s = m.INNE(n_estimators=200, seed=3).fit(X).score_samples(X)
+        assert s[y == 1].mean() > s[y == 0].mean()
+        assert roc_auc(y, s) > 0.9
+
+    def test_local_density_anomaly_between_clusters(self):
+        rng = np.random.default_rng(4)
+        dense = rng.normal(0.0, 0.1, size=(200, 2))
+        sparse = rng.normal(5.0, 1.0, size=(200, 2))
+        X = np.vstack([dense, sparse, [[0.8, 0.8]]])
+        s = m.INNE(n_estimators=300, max_samples=16, seed=5).fit(X).score_samples(X)
+        # The point near the dense cluster is far outside its local density.
+        assert s[-1] > np.quantile(s[:200], 0.99)
+
+    def test_held_out_far_point_scores_one(self):
+        X, _ = g.make_tabular(200, 3, 2, contamination=0.0, seed=903)
+        model = m.INNE(n_estimators=40, seed=0).fit(X)
+        far = model.score_samples(np.full((1, 3), 1e6))
+        assert far[0] == pytest.approx(1.0)
+        assert np.array_equal(model.scores_, model.score_samples(X))
+
+    def test_max_samples_capped_and_reproducible(self):
+        X = np.random.default_rng(6).normal(size=(5, 2))
+        model = m.INNE(n_estimators=10, max_samples=64, seed=2).fit(X)
+        assert model.max_samples_ == 5
+        a = m.INNE(n_estimators=30, seed=9).fit(X).score_samples(X)
+        b = m.INNE(n_estimators=30, seed=9).fit(X).score_samples(X)
+        assert np.array_equal(a, b)
+
+    def test_predict_flags_contamination(self):
+        X, y = g.make_tabular(400, 3, 2, contamination=0.05, outlier_types="shift", seed=904)
+        flags = m.INNE(seed=0).fit_predict(X, contamination=0.05)
+        assert flags.sum() >= 20
+        assert flags[y == 1].mean() > flags[y == 0].mean()
+
+    def test_validation(self):
+        with pytest.raises(ValueError):
+            m.INNE(n_estimators=0)
+        with pytest.raises(ValueError):
+            m.INNE(max_samples=1)
+        with pytest.raises(ValueError):
+            m.INNE().fit(np.zeros((1, 2)))
+        with pytest.raises(ValueError):
+            m.INNE().fit(np.array([[0.0, np.nan], [1.0, 2.0]]))
+        with pytest.raises(ValueError):
+            m.INNE().score_samples(np.zeros((3, 2)))
+        model = m.INNE(n_estimators=5).fit(np.random.default_rng(0).normal(size=(20, 2)))
+        with pytest.raises(ValueError):
+            model.score_samples(np.zeros((3, 3)))

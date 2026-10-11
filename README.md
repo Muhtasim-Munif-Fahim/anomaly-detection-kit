@@ -5,7 +5,7 @@ detection** in tabular data and time series. It ships classical statistical
 baselines (z-score, median/MAD, IQR fences, generalized ESD) and seventeen
 self-contained models (isolation forest, local outlier factor, k-nearest
 neighbours, COPOD, ECOD, HBOS, one-class SVM, EllipticEnvelope / FAST-MCD,
-CBLOF, LODA, ABOD, COF, SOD, PCA, KDE, SOS, GMM), plus a seeded synthetic-data generator,
+CBLOF, LODA, ABOD, COF, SOD, PCA, KDE, SOS, GMM, INNE), plus a seeded synthetic-data generator,
 evaluation metrics, and a markdown report renderer — all built on
 **numpy only** (no scipy, no sklearn).
 
@@ -46,7 +46,9 @@ readable and easy to extend.
   (stochastic outlier selection via perplexity-tuned affinities and binding
   probabilities; higher = more anomalous), and GMM
   (diagonal-covariance Gaussian mixture via EM; anomaly score is negative
-  log-likelihood under the fitted mixture; higher = more anomalous).
+  log-likelihood under the fitted mixture; higher = more anomalous), and INNE
+  (isolation using nearest-neighbour ensembles: adaptive hyperspheres around
+  small random subsamples; higher = more anomalous).
 - **Evaluation** — precision / recall / F1, rank-based ROC-AUC, threshold
   sweep with best-F1 selection, and a comparison table across detectors.
 - **Reports** — markdown renderer with per-detector score summaries, top
@@ -70,6 +72,24 @@ scores = GMM(n_components=3, seed=0).fit(X).score_samples(X)
 assert scores[y == 1].mean() > scores[y == 0].mean()
 ```
 
+## INNE (isolation using nearest-neighbour ensembles)
+
+`INNE` (Bandaragoda et al., 2018) draws `n_estimators` subsamples of
+`max_samples` rows (default 8). Each subsample row is the centre of a
+hypersphere whose radius is the distance to its nearest neighbour in that
+subsample. A point is scored by the smallest covering hypersphere as
+`1 - radius(neighbour of centre) / radius(centre)`, or 1 when no
+hypersphere covers it. The scores are averaged over the ensemble and lie in
+`[0, 1]`. The hyperspheres shrink in dense regions and grow in sparse ones,
+so INNE adapts to local density in a way axis-parallel isolation trees do
+not.
+
+```python
+from anomaly_detection.models import INNE
+
+scores = INNE(n_estimators=200, max_samples=8, seed=0).fit(X).score_samples(X)
+```
+
 ## Installation
 
 Requires Python 3.9+ and numpy.
@@ -85,7 +105,7 @@ pip install -e .        # optional, exposes the `anomaly-detect` command
 
 ```python
 from anomaly_detection.generators import make_tabular
-from anomaly_detection.models import ABOD, CBLOF, COF, COPOD, ECOD, EllipticEnvelope, GMM, HBOS, IsolationForest, KDE, KNN, LODA, OneClassSVM, PCA, SOD, SOS
+from anomaly_detection.models import ABOD, CBLOF, COF, COPOD, ECOD, EllipticEnvelope, GMM, HBOS, INNE, IsolationForest, KDE, KNN, LODA, OneClassSVM, PCA, SOD, SOS
 from anomaly_detection.evaluate import compare_detectors
 
 X, y_true = make_tabular(n_samples=600, contamination=0.05, seed=7)
@@ -106,6 +126,7 @@ detectors = {
     "PCA": PCA(n_components=0.95).fit(X).score_samples,
     "KDE": KDE(bandwidth="scott").fit(X).score_samples,
     "GMM": GMM(n_components=3, seed=0).fit(X).score_samples,
+    "INNE": INNE(seed=0).fit(X).score_samples,
 }
 rows = compare_detectors(X, y_true, detectors, contamination=0.05)
 print(rows[0]["f1"], rows[0]["auc"])
@@ -194,6 +215,7 @@ Or without installing: `python -m anomaly_detection <command> ...`.
 | PCA               | model         | higher = more anomalous                | `n_components`              |
 | KDE               | model         | higher = more anomalous                | `bandwidth`, `standardize`  |
 | GMM               | model         | higher = more anomalous                | `n_components`, `seed`      |
+| INNE              | model         | higher = more anomalous, in [0, 1]     | `n_estimators`, `max_samples`|
 | z-score           | statistical   | max abs z per row                       | `threshold` (default 3.0)   |
 | Modified z-score  | statistical   | median/MAD robust z                    | `threshold` (default 3.5)   |
 | IQR fences        | statistical   | distance beyond fence / IQR            | `k` (default 1.5)           |
@@ -205,7 +227,7 @@ Or without installing: `python -m anomaly_detection <command> ...`.
 src/anomaly_detection/
 ├── generators.py   # seeded synthetic data (tabular + time series)
 ├── classic.py      # statistical baselines incl. GESD
-├── models.py       # isolation forest, LOF, kNN, COPOD, ECOD, HBOS, one-class SVM, EllipticEnvelope, CBLOF, LODA, ABOD, COF, SOD, PCA, KDE, SOS, GMM
+├── models.py       # isolation forest, LOF, kNN, COPOD, ECOD, HBOS, one-class SVM, EllipticEnvelope, CBLOF, LODA, ABOD, COF, SOD, PCA, KDE, SOS, GMM, INNE
 ├── evaluate.py     # metrics, threshold sweep, comparison
 ├── report.py       # markdown rendering
 └── cli.py          # command line interface
