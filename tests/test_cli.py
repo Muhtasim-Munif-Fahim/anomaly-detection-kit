@@ -197,6 +197,7 @@ class TestParser:
             "sos",
             "gmm",
             "inne",
+            "eif",
             "zscore",
             "mad",
             "iqr",
