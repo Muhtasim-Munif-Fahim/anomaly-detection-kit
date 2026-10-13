@@ -2,8 +2,8 @@
 
 A small, dependency-light toolkit for **unsupervised anomaly / outlier
 detection** in tabular data and time series. It ships classical statistical
-baselines (z-score, median/MAD, IQR fences, generalized ESD) and seventeen
-self-contained models (isolation forest, local outlier factor, k-nearest
+baselines (z-score, median/MAD, IQR fences, generalized ESD) and nineteen
+self-contained models (isolation forest, extended isolation forest, local outlier factor, k-nearest
 neighbours, COPOD, ECOD, HBOS, one-class SVM, EllipticEnvelope / FAST-MCD,
 CBLOF, LODA, ABOD, COF, SOD, PCA, KDE, SOS, GMM, INNE), plus a seeded synthetic-data generator,
 evaluation metrics, and a markdown report renderer — all built on
@@ -48,7 +48,10 @@ readable and easy to extend.
   (diagonal-covariance Gaussian mixture via EM; anomaly score is negative
   log-likelihood under the fitted mixture; higher = more anomalous), and INNE
   (isolation using nearest-neighbour ensembles: adaptive hyperspheres around
-  small random subsamples; higher = more anomalous).
+  small random subsamples; higher = more anomalous), and the Extended
+  Isolation Forest (random-hyperplane isolation cuts with a tunable
+  `extension_level`; removes the axis-parallel score artefacts of the classic
+  forest; higher = more anomalous).
 - **Evaluation** — precision / recall / F1, rank-based ROC-AUC, threshold
   sweep with best-F1 selection, and a comparison table across detectors.
 - **Reports** — markdown renderer with per-detector score summaries, top
@@ -90,6 +93,26 @@ from anomaly_detection.models import INNE
 scores = INNE(n_estimators=200, max_samples=8, seed=0).fit(X).score_samples(X)
 ```
 
+## Extended Isolation Forest
+
+`ExtendedIsolationForest` (Hariri, Carrasco Kind & Brunner, 2019) cuts each
+node with a random hyperplane `(x - p) · n <= 0`. The normal `n` is Gaussian
+and the intercept `p` is uniform in the node's bounding box, instead of the
+single-feature cut of the classic forest. Axis-parallel cuts leave "ghost" bands of
+low scores: with two blobs at (-3, -3) and (3, 3), the empty corner (3, -3)
+looks as normal as the gap between them. Random hyperplanes remove that
+artefact. `extension_level=0` gives one non-zero normal coordinate
+(axis-parallel); the default `None` means `d - 1` (fully extended). Path
+lengths and the `2^(-E[h]/c(psi))` score match `IsolationForest`.
+
+```python
+from anomaly_detection.models import ExtendedIsolationForest
+
+eif = ExtendedIsolationForest(n_estimators=200, max_samples=256, seed=0).fit(X)
+scores = eif.score_samples(X)              # (0, 1], higher = more anomalous
+axis = ExtendedIsolationForest(extension_level=0, seed=0).fit(X)
+```
+
 ## Installation
 
 Requires Python 3.9+ and numpy.
@@ -105,7 +128,7 @@ pip install -e .        # optional, exposes the `anomaly-detect` command
 
 ```python
 from anomaly_detection.generators import make_tabular
-from anomaly_detection.models import ABOD, CBLOF, COF, COPOD, ECOD, EllipticEnvelope, GMM, HBOS, INNE, IsolationForest, KDE, KNN, LODA, OneClassSVM, PCA, SOD, SOS
+from anomaly_detection.models import ABOD, CBLOF, COF, COPOD, ECOD, EllipticEnvelope, GMM, HBOS, INNE, ExtendedIsolationForest, IsolationForest, KDE, KNN, LODA, OneClassSVM, PCA, SOD, SOS
 from anomaly_detection.evaluate import compare_detectors
 
 X, y_true = make_tabular(n_samples=600, contamination=0.05, seed=7)
@@ -127,6 +150,7 @@ detectors = {
     "KDE": KDE(bandwidth="scott").fit(X).score_samples,
     "GMM": GMM(n_components=3, seed=0).fit(X).score_samples,
     "INNE": INNE(seed=0).fit(X).score_samples,
+    "EIF": ExtendedIsolationForest(seed=0).fit(X).score_samples,
 }
 rows = compare_detectors(X, y_true, detectors, contamination=0.05)
 print(rows[0]["f1"], rows[0]["auc"])

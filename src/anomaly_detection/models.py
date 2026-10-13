@@ -1,6 +1,6 @@
 """Model-based anomaly detectors.
 
-Eighteen dependency-free models:
+Nineteen dependency-free models:
 
 * :class:`IsolationForest` -- random feature + random split-point trees with
   path-length anomaly scoring (higher score = more anomalous).
@@ -45,6 +45,9 @@ Eighteen dependency-free models:
 * :class:`INNE` -- isolation using nearest-neighbour ensembles: adaptive
   hyperspheres around small random subsamples, scored by the covering
   sphere's radius ratio to its neighbour's (higher = more anomalous).
+* :class:`ExtendedIsolationForest` -- isolation trees with random-hyperplane
+  cuts instead of axis-parallel ones, removing the score "ghost" bands of the
+  classic forest (higher = more anomalous).
 
 All expose the same interface: ``fit``, ``score_samples(X)`` returning
 continuous anomaly scores, and ``fit_predict(X, contamination=...)``
@@ -2629,6 +2632,196 @@ class INNE:
         if X.shape[1] != self._n_features:
             raise ValueError(
                 f"X has {X.shape[1]} features, but INNE was fitted on {self._n_features}"
+            )
+        if not np.all(np.isfinite(X)):
+            raise ValueError("X must contain only finite values")
+        return self._score(X)
+
+    def predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
+        return _flags_from_contamination(self.score_samples(X), contamination)
+
+    def fit_predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
+        return self.fit(X).predict(X, contamination=contamination)
+
+
+class ExtendedIsolationForest:
+    """Extended Isolation Forest (Hariri, Carrasco Kind & Brunner, 2019).
+
+    Standard isolation trees split on one feature at a time, so their score
+    maps show axis-parallel "ghost" bands: a point lying off-axis next to a
+    cluster can look as normal as one inside it. EIF replaces each
+    axis-parallel cut with a random hyperplane ``(x - p) . n <= 0``. The
+    normal ``n`` is drawn from a standard Gaussian, and ``p`` uniformly
+    inside the node's bounding box. ``extension_level`` sets how many
+    coordinates of ``n`` may be non-zero beyond the first:
+
+    * ``0`` -- one non-zero coordinate, an axis-parallel cut like the
+      classic forest;
+    * ``d - 1`` (the default, ``None``) -- fully extended, with every
+      coordinate random.
+
+    Path lengths, the ``c(psi)`` normaliser and the score
+    ``s = 2 ** (-E[h] / c(psi))`` match :class:`IsolationForest`. Scores
+    lie in ``(0, 1]`` and higher means more anomalous.
+
+    Parameters
+    ----------
+    n_estimators:
+        Number of trees.
+    max_samples:
+        Subsample size ``psi`` per tree (capped at the number of rows).
+    extension_level:
+        ``0 .. d-1``, or ``None`` for ``d - 1``.
+    max_depth:
+        Height limit (default ``ceil(log2(psi))``).
+    seed:
+        RNG seed.
+    """
+
+    def __init__(
+        self,
+        n_estimators: int = 100,
+        max_samples: int = 256,
+        extension_level: Optional[int] = None,
+        max_depth: Optional[int] = None,
+        seed: Optional[int] = 0,
+    ) -> None:
+        if isinstance(n_estimators, bool) or not isinstance(n_estimators, (int, np.integer)) or n_estimators < 1:
+            raise ValueError("n_estimators must be a positive integer")
+        if isinstance(max_samples, bool) or not isinstance(max_samples, (int, np.integer)) or max_samples < 2:
+            raise ValueError("max_samples must be an integer >= 2")
+        if extension_level is not None and (
+            isinstance(extension_level, bool)
+            or not isinstance(extension_level, (int, np.integer))
+            or extension_level < 0
+        ):
+            raise ValueError("extension_level must be a non-negative integer or None")
+        if max_depth is not None and int(max_depth) < 1:
+            raise ValueError("max_depth must be >= 1")
+        self.n_estimators = int(n_estimators)
+        self.max_samples = int(max_samples)
+        self.extension_level = extension_level
+        self.max_depth = max_depth
+        self.seed = seed
+        self.scores_: Optional[np.ndarray] = None
+        self.extension_level_: Optional[int] = None
+        self.max_samples_: Optional[int] = None
+        self._trees: list = []
+        self._n_features: Optional[int] = None
+
+    def fit(self, X: np.ndarray) -> "ExtendedIsolationForest":
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array of shape (n_samples, n_features)")
+        n, d = X.shape
+        if n < 2:
+            raise ValueError("ExtendedIsolationForest needs at least two samples")
+        if d < 1:
+            raise ValueError("ExtendedIsolationForest needs at least one feature")
+        if not np.all(np.isfinite(X)):
+            raise ValueError("X must contain only finite values")
+        ext = d - 1 if self.extension_level is None else int(self.extension_level)
+        if ext > d - 1:
+            raise ValueError(f"extension_level must be <= n_features - 1 = {d - 1}")
+        psi = min(self.max_samples, n)
+        depth = int(math.ceil(math.log2(psi))) if self.max_depth is None else int(self.max_depth)
+        rng = np.random.default_rng(self.seed)
+        self._trees = []
+        for _ in range(self.n_estimators):
+            idx = rng.choice(n, size=psi, replace=False)
+            self._trees.append(self._fit_tree(X[idx], depth, ext, rng))
+        self.extension_level_ = ext
+        self.max_samples_ = psi
+        self._n_features = d
+        self.scores_ = self._score(X)
+        return self
+
+    @staticmethod
+    def _fit_tree(X: np.ndarray, max_depth: int, ext: int, rng: np.random.Generator) -> dict:
+        d = X.shape[1]
+        left: list = []
+        right: list = []
+        normals: list = []
+        offsets: list = []
+        sizes: list = []
+        zero = np.zeros(d)
+
+        def build(idx: np.ndarray, depth: int) -> int:
+            node = len(left)
+            left.append(-1)
+            right.append(-1)
+            normals.append(zero)
+            offsets.append(0.0)
+            sizes.append(int(idx.size))
+            if idx.size <= 1 or depth >= max_depth:
+                return node
+            pts = X[idx]
+            lo = pts.min(axis=0)
+            hi = pts.max(axis=0)
+            if np.all(hi - lo <= 1e-12):
+                return node
+            for _ in range(8):
+                nvec = rng.normal(size=d)
+                n_zero = d - ext - 1
+                if n_zero > 0:
+                    nvec[rng.choice(d, size=n_zero, replace=False)] = 0.0
+                p = rng.uniform(lo, hi)
+                proj = pts @ nvec
+                thresh = float(p @ nvec)
+                go_left = proj <= thresh
+                if 0 < go_left.sum() < idx.size:
+                    break
+            else:
+                return node
+            normals[node] = nvec
+            offsets[node] = thresh
+            left[node] = build(idx[go_left], depth + 1)
+            right[node] = build(idx[~go_left], depth + 1)
+            return node
+
+        build(np.arange(X.shape[0]), 0)
+        return {
+            "left": np.asarray(left, dtype=np.int64),
+            "right": np.asarray(right, dtype=np.int64),
+            "normals": np.vstack(normals),
+            "offsets": np.asarray(offsets, dtype=float),
+            "sizes": np.asarray(sizes, dtype=np.int64),
+        }
+
+    @staticmethod
+    def _path_lengths(tree: dict, X: np.ndarray) -> np.ndarray:
+        left, right = tree["left"], tree["right"]
+        normals, offsets, sizes = tree["normals"], tree["offsets"], tree["sizes"]
+        n = X.shape[0]
+        node = np.zeros(n, dtype=np.int64)
+        depth = np.zeros(n)
+        active = left[node] >= 0
+        while active.any():
+            act = np.flatnonzero(active)
+            cur = node[act]
+            proj = np.einsum("ij,ij->i", X[act], normals[cur])
+            node[act] = np.where(proj <= offsets[cur], left[cur], right[cur])
+            depth[act] += 1
+            active[act] = left[node[act]] >= 0
+        return depth + _harmonic_correction(sizes[node])
+
+    def _score(self, X: np.ndarray) -> np.ndarray:
+        total = np.zeros(X.shape[0])
+        for tree in self._trees:
+            total += self._path_lengths(tree, X)
+        avg = total / len(self._trees)
+        c = float(_harmonic_correction(np.asarray([self.max_samples_]))[0])
+        return 2.0 ** (-avg / c) if c > 0 else np.ones(X.shape[0])
+
+    def score_samples(self, X: np.ndarray) -> np.ndarray:
+        if not self._trees:
+            raise ValueError("ExtendedIsolationForest must be fitted before scoring")
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array of shape (n_samples, n_features)")
+        if X.shape[1] != self._n_features:
+            raise ValueError(
+                f"X has {X.shape[1]} features, but ExtendedIsolationForest was fitted on {self._n_features}"
             )
         if not np.all(np.isfinite(X)):
             raise ValueError("X must contain only finite values")
