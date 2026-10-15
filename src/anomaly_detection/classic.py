@@ -5,7 +5,8 @@ Pure-numpy implementations of the standard baselines:
 * z-score (per-column, combined with the max over columns),
 * modified z-score based on the median absolute deviation,
 * Tukey IQR fences,
-* the generalized ESD test for univariate time series.
+* the generalized ESD test for univariate time series,
+* Seasonal Hybrid ESD (S-H-ESD) for seasonal series.
 
 GESD needs Student-t critical values; the required regularised incomplete
 beta function and its inverse are implemented in this module (``_ibeta``,
@@ -292,6 +293,76 @@ def gesd_indices(
     _, anomalies, _, _ = gesd(values, k=k, alpha=alpha)
     return anomalies
 
+
+
+
+# ---------------------------------------------------------------------------
+# Seasonal Hybrid ESD (S-H-ESD)
+# ---------------------------------------------------------------------------
+
+def _seasonal_median_decompose(
+    values: np.ndarray,
+    period: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Median seasonal + robust trend decomposition (STL-lite).
+
+    Seasonal component: median of values at the same phase within the
+    period. Trend: centred moving median with window ``period`` (odd-ified).
+    Residual = values - seasonal - trend.
+    """
+    x = np.asarray(values, dtype=float)
+    n = x.size
+    if period < 2:
+        raise ValueError("period must be >= 2")
+    if n < 2 * period:
+        raise ValueError("need at least two full seasons for S-H-ESD")
+    # Seasonal medians by phase
+    seasonal = np.zeros(n)
+    for phase in range(period):
+        idx = np.arange(phase, n, period)
+        seasonal[idx] = float(np.median(x[idx]))
+    # Detrend residual for trend estimate
+    deseas = x - seasonal
+    win = period if period % 2 == 1 else period + 1
+    half = win // 2
+    trend = np.empty(n)
+    for i in range(n):
+        lo = max(0, i - half)
+        hi = min(n, i + half + 1)
+        trend[i] = float(np.median(deseas[lo:hi]))
+    residual = x - seasonal - trend
+    return seasonal, trend, residual
+
+
+def seasonal_hybrid_esd(
+    values: np.ndarray,
+    period: int,
+    k: int = 5,
+    alpha: float = 0.05,
+) -> tuple[np.ndarray, list[int], np.ndarray, np.ndarray, np.ndarray]:
+    """Seasonal Hybrid ESD (Twitter S-H-ESD) for seasonal time series.
+
+    Decomposes ``values`` into seasonal + trend + residual with a median
+    seasonal pattern and moving-median trend, then runs the generalized
+    ESD test on the residual. Returns
+    ``(flags, anomaly_indices, seasonal, trend, residual)``.
+    """
+    seasonal, trend, residual = _seasonal_median_decompose(values, period)
+    flags, anomalies, _R, _lam = gesd(residual, k=k, alpha=alpha)
+    return flags, anomalies, seasonal, trend, residual
+
+
+def seasonal_hybrid_esd_indices(
+    values: np.ndarray,
+    period: int,
+    k: int = 5,
+    alpha: float = 0.05,
+) -> list[int]:
+    """Return anomaly indices from :func:`seasonal_hybrid_esd`."""
+    _, anomalies, _, _, _ = seasonal_hybrid_esd(
+        values, period=period, k=k, alpha=alpha
+    )
+    return anomalies
 
 # ---------------------------------------------------------------------------
 # registry for the evaluation module
