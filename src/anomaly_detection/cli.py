@@ -18,7 +18,7 @@ from typing import List, Optional
 import numpy as np
 
 from . import report as rep
-from .classic import STATISTICAL_SCORERS
+from .classic import STATISTICAL_SCORERS, matrix_profile_discords
 from .evaluate import best_f1_threshold, compare_detectors, evaluate_scores, threshold_sweep
 from .generators import make_tabular
 from .models import (
@@ -211,6 +211,44 @@ def _cmd_report(args: argparse.Namespace) -> None:
     print(f"wrote {args.out}")
 
 
+def _synthetic_series(n: int, period: int, seed: int) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    t = np.arange(n)
+    values = np.sin(2 * np.pi * t / period) + 0.1 * rng.normal(size=n)
+    start = n // 2
+    width = max(3, period // 2)
+    values[start:start + width] += np.linspace(0.0, 2.0, width)  # distorted cycle
+    return values
+
+
+def _cmd_discords(args: argparse.Namespace) -> None:
+    if args.data:
+        X, _, names = _read_labeled(args.data)
+        if args.column is None:
+            col = X.shape[1] - 1
+        elif args.column in names:
+            col = names.index(args.column)
+        else:
+            try:
+                col = int(args.column)
+            except ValueError:
+                raise SystemExit(f"unknown column {args.column!r}; available: {', '.join(names)}")
+            if not 0 <= col < X.shape[1]:
+                raise SystemExit(f"column index {col} out of range")
+        values = X[:, col]
+        source = f"{args.data} [{names[col] if col < len(names) else col}]"
+    else:
+        values = _synthetic_series(args.n_points, args.window, args.seed)
+        source = f"synthetic sine (n={args.n_points}, distorted cycle at {args.n_points // 2})"
+    try:
+        found = matrix_profile_discords(values, args.window, k=args.k)
+    except ValueError as exc:
+        raise SystemExit(f"discords: {exc}")
+    print(f"matrix-profile discords: {source}, window={args.window}")
+    for rank, (start, dist) in enumerate(found, 1):
+        print(f"  #{rank}: start={start} end={start + args.window - 1} distance={dist:.4f}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="anomaly-detect",
@@ -242,6 +280,17 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--seed", type=int, default=0)
     evaluate.add_argument("--out", default=None, help="optional markdown report path")
     evaluate.set_defaults(func=_cmd_evaluate)
+
+    discords = sub.add_parser(
+        "discords", help="top-k anomalous subsequences of a series via the matrix profile"
+    )
+    discords.add_argument("--data", default=None, help="CSV with a header; default: synthetic series")
+    discords.add_argument("--column", default=None, help="column name or index (default: last feature)")
+    discords.add_argument("--window", type=int, default=40, help="subsequence length (default: 40)")
+    discords.add_argument("--k", type=int, default=3, help="number of discords (default: 3)")
+    discords.add_argument("--n-points", type=int, default=600, help="synthetic series length")
+    discords.add_argument("--seed", type=int, default=0)
+    discords.set_defaults(func=_cmd_discords)
 
     report = sub.add_parser("report", help="run the full pipeline and write a markdown report")
     report.add_argument("--n-samples", type=int, default=500)

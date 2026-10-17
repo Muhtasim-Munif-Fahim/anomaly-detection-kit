@@ -6,7 +6,8 @@ Pure-numpy implementations of the standard baselines:
 * modified z-score based on the median absolute deviation,
 * Tukey IQR fences,
 * the generalized ESD test for univariate time series,
-* Seasonal Hybrid ESD (S-H-ESD) for seasonal series.
+* Seasonal Hybrid ESD (S-H-ESD) for seasonal series,
+* matrix-profile discords (STOMP) for anomalous *subsequences*.
 
 GESD needs Student-t critical values; the required regularised incomplete
 beta function and its inverse are implemented in this module (``_ibeta``,
@@ -363,6 +364,128 @@ def seasonal_hybrid_esd_indices(
         values, period=period, k=k, alpha=alpha
     )
     return anomalies
+
+# ---------------------------------------------------------------------------
+# Matrix profile discords (STOMP)
+# ---------------------------------------------------------------------------
+
+def _validate_window(values: np.ndarray, window: int) -> np.ndarray:
+    x = np.asarray(values, dtype=float).ravel()
+    if not np.all(np.isfinite(x)):
+        raise ValueError("values must be finite")
+    if isinstance(window, bool) or not isinstance(window, (int, np.integer)) or window < 3:
+        raise ValueError("window must be an integer >= 3")
+    window = int(window)
+    if x.size < 2 * window:
+        raise ValueError("series must contain at least 2 * window points")
+    return x
+
+
+def _default_exclusion(window: int) -> int:
+    return int(np.ceil(window / 4.0))
+
+
+def matrix_profile(
+    values: np.ndarray,
+    window: int,
+    exclusion_zone: Optional[int] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Self-join matrix profile with z-normalised Euclidean distance (STOMP).
+
+    For every subsequence ``T[i:i+window]`` returns the distance to its
+    nearest non-trivial neighbour (``profile[i]``) and that neighbour's start
+    (``index[i]``). Matches within ``exclusion_zone`` of ``i`` (default
+    ``ceil(window / 4)``) are trivial and ignored. Constant subsequences are
+    at distance 0 from each other and ``sqrt(window)`` from anything else.
+
+    The sliding dot products are updated row by row with the STOMP
+    recurrence ``QT[i, j] = QT[i-1, j-1] - T[i-1] T[j-1] + T[i+m-1] T[j+m-1]``
+    (Zhu et al. 2016), so the cost is ``O(n^2)`` time and ``O(n)`` memory.
+    """
+    x = _validate_window(values, window)
+    m = int(window)
+    excl = _default_exclusion(m) if exclusion_zone is None else int(exclusion_zone)
+    if excl < 0:
+        raise ValueError("exclusion_zone must be non-negative")
+    n_sub = x.size - m + 1
+    windows = np.lib.stride_tricks.sliding_window_view(x, m)
+    mu = windows.mean(axis=1)
+    sigma = windows.std(axis=1)
+    constant = sigma <= 1e-12 * max(1.0, float(np.max(np.abs(x))))
+    sigma_safe = np.where(constant, 1.0, sigma)
+
+    first_row = windows @ windows[0]  # QT[0, j]
+    qt = first_row.copy()
+    profile = np.full(n_sub, np.inf)
+    index = np.full(n_sub, -1, dtype=int)
+    all_j = np.arange(n_sub)
+    for i in range(n_sub):
+        if i > 0:
+            qt[1:] = qt[:-1] - x[i - 1] * x[: n_sub - 1] + x[i + m - 1] * x[m: m + n_sub - 1]
+            qt[0] = first_row[i]
+        corr = (qt - m * mu[i] * mu) / (m * sigma_safe[i] * sigma_safe)
+        d2 = np.maximum(2.0 * m * (1.0 - corr), 0.0)
+        if constant[i]:
+            d2 = np.where(constant, 0.0, float(m))
+        else:
+            d2 = np.where(constant, float(m), d2)
+        lo, hi = max(0, i - excl), min(n_sub, i + excl + 1)
+        d2[lo:hi] = np.inf
+        j = int(np.argmin(d2))
+        if np.isfinite(d2[j]):
+            profile[i] = float(np.sqrt(d2[j]))
+            index[i] = int(all_j[j])
+    return profile, index
+
+
+def matrix_profile_discords(
+    values: np.ndarray,
+    window: int,
+    k: int = 1,
+    exclusion_zone: Optional[int] = None,
+) -> List[Tuple[int, float]]:
+    """Top-``k`` discords: subsequences farthest from their nearest neighbour.
+
+    Returns ``[(start, distance), ...]`` sorted by decreasing distance.
+    Discords are non-overlapping: after picking one, every start within
+    ``window`` of it is excluded. Fewer than ``k`` are returned when the
+    series runs out of non-overlapping candidates.
+    """
+    if isinstance(k, bool) or not isinstance(k, (int, np.integer)) or k < 1:
+        raise ValueError("k must be a positive integer")
+    profile, _ = matrix_profile(values, window, exclusion_zone=exclusion_zone)
+    mp = profile.copy()
+    mp[~np.isfinite(mp)] = -np.inf
+    out: List[Tuple[int, float]] = []
+    for _ in range(int(k)):
+        start = int(np.argmax(mp))
+        if not np.isfinite(mp[start]):
+            break
+        out.append((start, float(profile[start])))
+        lo, hi = max(0, start - int(window) + 1), min(mp.size, start + int(window))
+        mp[lo:hi] = -np.inf
+    return out
+
+
+def matrix_profile_scores(
+    values: np.ndarray,
+    window: int,
+    exclusion_zone: Optional[int] = None,
+) -> np.ndarray:
+    """Per-point anomaly score: the largest profile value of any covering window.
+
+    Spreads each subsequence's matrix-profile distance over the points it
+    covers, giving a length-``n`` score compatible with the evaluation
+    helpers (``roc_auc``, ``best_f1_threshold``).
+    """
+    profile, _ = matrix_profile(values, window, exclusion_zone=exclusion_zone)
+    m = int(window)
+    n = profile.size + m - 1
+    prof = np.where(np.isfinite(profile), profile, 0.0)
+    scores = np.zeros(n)
+    for offset in range(m):
+        np.maximum(scores[offset: offset + prof.size], prof, out=scores[offset: offset + prof.size])
+    return scores
 
 # ---------------------------------------------------------------------------
 # registry for the evaluation module
