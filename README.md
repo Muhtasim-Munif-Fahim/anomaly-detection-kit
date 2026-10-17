@@ -20,6 +20,9 @@ readable and easy to extend.
 - **Classical baselines** — z-score, modified z-score (median/MAD),
   Tukey IQR fences, and the generalized ESD test. GESD critical values use
   an in-house Student-t quantile (regularised incomplete beta).
+- **Time-series subsequences** — Seasonal Hybrid ESD and matrix-profile
+  discords (STOMP self-join, z-normalised distance) for anomalous *shapes*
+  rather than single extreme points.
 - **Models** — an isolation forest with random feature/split trees and
   path-length scoring, a local outlier factor with kNN
   reachability-density ratios, k-nearest neighbours (k-th neighbour
@@ -111,6 +114,30 @@ from anomaly_detection.models import ExtendedIsolationForest
 eif = ExtendedIsolationForest(n_estimators=200, max_samples=256, seed=0).fit(X)
 scores = eif.score_samples(X)              # (0, 1], higher = more anomalous
 axis = ExtendedIsolationForest(extension_level=0, seed=0).fit(X)
+```
+
+## Matrix-profile discords (anomalous subsequences)
+
+Point detectors miss anomalies whose individual values are ordinary but whose
+*shape* is not (a distorted cycle, a missing beat). The matrix profile stores,
+for every length-`window` subsequence, the z-normalised Euclidean distance to
+its nearest non-trivial neighbour (matches within `exclusion_zone`, default
+`ceil(window/4)`, are ignored). Subsequences with the largest profile values
+are **discords**. `matrix_profile` computes it with the STOMP recurrence
+(`O(n^2)` time, `O(n)` memory); `matrix_profile_discords` returns the top-`k`
+non-overlapping discords and `matrix_profile_scores` spreads the profile into
+a per-point score for `roc_auc` / `best_f1_threshold`.
+
+```python
+from anomaly_detection.classic import matrix_profile, matrix_profile_discords
+
+profile, nn_index = matrix_profile(values, window=40)
+matrix_profile_discords(values, window=40, k=3)   # [(start, distance), ...]
+```
+
+```bash
+anomaly-detect discords --window 40 --k 3                 # synthetic demo
+anomaly-detect discords --data series.csv --column value --window 96
 ```
 
 ## Installation
@@ -244,13 +271,14 @@ Or without installing: `python -m anomaly_detection <command> ...`.
 | Modified z-score  | statistical   | median/MAD robust z                    | `threshold` (default 3.5)   |
 | IQR fences        | statistical   | distance beyond fence / IQR            | `k` (default 1.5)           |
 | Generalized ESD   | time series   | standardised deviation vs t critical   | `k`, `alpha`                |
+| Matrix-profile discords | time series | z-norm distance to nearest neighbour subsequence | `window`, `k`, `exclusion_zone` |
 
 ## Project layout
 
 ```
 src/anomaly_detection/
 ├── generators.py   # seeded synthetic data (tabular + time series)
-├── classic.py      # statistical baselines incl. GESD
+├── classic.py      # statistical baselines incl. GESD, S-H-ESD, matrix-profile discords
 ├── models.py       # isolation forest, LOF, kNN, COPOD, ECOD, HBOS, one-class SVM, EllipticEnvelope, CBLOF, LODA, ABOD, COF, SOD, PCA, KDE, SOS, GMM, INNE
 ├── evaluate.py     # metrics, threshold sweep, comparison
 ├── report.py       # markdown rendering
