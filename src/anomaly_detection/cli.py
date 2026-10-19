@@ -5,6 +5,8 @@ Subcommands:
 * ``simulate``  -- write labelled synthetic tabular data to CSV,
 * ``detect``    -- run one or all detectors over a CSV and report flagged rows,
 * ``evaluate``  -- compare every detector on labelled data and print metrics,
+* ``discords``  -- top-k anomalous subsequences via the matrix profile,
+* ``changepoints`` -- level/variance change points via BOCPD and CUSUM,
 * ``report``    -- full pipeline (simulate + evaluate + markdown report).
 """
 
@@ -18,6 +20,7 @@ from typing import List, Optional
 import numpy as np
 
 from . import report as rep
+from .changepoint import bocpd, changepoint_hits, cusum
 from .classic import STATISTICAL_SCORERS, matrix_profile_discords
 from .evaluate import best_f1_threshold, compare_detectors, evaluate_scores, threshold_sweep
 from .generators import make_tabular
@@ -221,22 +224,25 @@ def _synthetic_series(n: int, period: int, seed: int) -> np.ndarray:
     return values
 
 
+def _series_from_csv(path: str, column: Optional[str]):
+    X, _, names = _read_labeled(path)
+    if column is None:
+        col = X.shape[1] - 1
+    elif column in names:
+        col = names.index(column)
+    else:
+        try:
+            col = int(column)
+        except ValueError:
+            raise SystemExit(f"unknown column {column!r}; available: {', '.join(names)}")
+        if not 0 <= col < X.shape[1]:
+            raise SystemExit(f"column index {col} out of range")
+    return X[:, col], f"{path} [{names[col] if col < len(names) else col}]"
+
+
 def _cmd_discords(args: argparse.Namespace) -> None:
     if args.data:
-        X, _, names = _read_labeled(args.data)
-        if args.column is None:
-            col = X.shape[1] - 1
-        elif args.column in names:
-            col = names.index(args.column)
-        else:
-            try:
-                col = int(args.column)
-            except ValueError:
-                raise SystemExit(f"unknown column {args.column!r}; available: {', '.join(names)}")
-            if not 0 <= col < X.shape[1]:
-                raise SystemExit(f"column index {col} out of range")
-        values = X[:, col]
-        source = f"{args.data} [{names[col] if col < len(names) else col}]"
+        values, source = _series_from_csv(args.data, args.column)
     else:
         values = _synthetic_series(args.n_points, args.window, args.seed)
         source = f"synthetic sine (n={args.n_points}, distorted cycle at {args.n_points // 2})"
@@ -247,6 +253,53 @@ def _cmd_discords(args: argparse.Namespace) -> None:
     print(f"matrix-profile discords: {source}, window={args.window}")
     for rank, (start, dist) in enumerate(found, 1):
         print(f"  #{rank}: start={start} end={start + args.window - 1} distance={dist:.4f}")
+
+
+def _synthetic_regimes(n: int, seed: int):
+    """Piecewise-constant mean with three level shifts at known positions."""
+    rng = np.random.default_rng(seed)
+    cuts = [n // 4, n // 2, (3 * n) // 4]
+    levels = [0.0, 2.5, -0.5, 1.5]
+    values = rng.normal(size=n)
+    for start, end, level in zip([0] + cuts, cuts + [n], levels):
+        values[start:end] += level
+    return values, cuts
+
+
+def _cmd_changepoints(args: argparse.Namespace) -> None:
+    truth = None
+    if args.data:
+        values, source = _series_from_csv(args.data, args.column)
+    else:
+        values, truth = _synthetic_regimes(args.n_points, args.seed)
+        source = f"synthetic regimes (n={args.n_points}, true change points {truth})"
+    print(f"change points: {source}")
+    try:
+        if args.method in ("bocpd", "both"):
+            res = bocpd(
+                values,
+                hazard=args.hazard,
+                lag=args.lag,
+                threshold=args.threshold,
+                max_run_length=args.max_run_length,
+            )
+            print(f"  bocpd (hazard={args.hazard}, lag={args.lag}): {res.changepoints}")
+            print(f"    log evidence = {res.log_evidence:.3f}")
+            for cp in res.changepoints:
+                print(f"    start={cp} probability={res.changepoint_score[cp]:.3f}")
+            if truth is not None:
+                p, r, f = changepoint_hits(res.changepoints, truth, tolerance=args.tolerance)
+                print(f"    precision={p:.3f} recall={r:.3f} f1={f:.3f} (tolerance {args.tolerance})")
+        if args.method in ("cusum", "both"):
+            res_c = cusum(values, k=args.k, h=args.h)
+            print(f"  cusum (k={args.k}, h={args.h}): {res_c.changepoints}")
+            for alarm in res_c.alarms:
+                print(f"    alarm={alarm.alarm_index} start={alarm.start_index} direction={alarm.direction}")
+            if truth is not None:
+                p, r, f = changepoint_hits(res_c.changepoints, truth, tolerance=args.tolerance)
+                print(f"    precision={p:.3f} recall={r:.3f} f1={f:.3f} (tolerance {args.tolerance})")
+    except ValueError as exc:
+        raise SystemExit(f"changepoints: {exc}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -291,6 +344,23 @@ def build_parser() -> argparse.ArgumentParser:
     discords.add_argument("--n-points", type=int, default=600, help="synthetic series length")
     discords.add_argument("--seed", type=int, default=0)
     discords.set_defaults(func=_cmd_discords)
+
+    changepoints = sub.add_parser(
+        "changepoints", help="level/variance change points via BOCPD and/or two-sided CUSUM"
+    )
+    changepoints.add_argument("--data", default=None, help="CSV with a header; default: synthetic regimes")
+    changepoints.add_argument("--column", default=None, help="column name or index (default: last feature)")
+    changepoints.add_argument("--method", choices=["bocpd", "cusum", "both"], default="both")
+    changepoints.add_argument("--hazard", type=float, default=1.0 / 250.0, help="BOCPD change rate per step")
+    changepoints.add_argument("--lag", type=int, default=10, help="BOCPD confirmation lag (points)")
+    changepoints.add_argument("--threshold", type=float, default=0.5, help="BOCPD posterior threshold")
+    changepoints.add_argument("--max-run-length", type=int, default=None, help="BOCPD run-length truncation")
+    changepoints.add_argument("--k", type=float, default=0.5, help="CUSUM reference value (sigmas)")
+    changepoints.add_argument("--h", type=float, default=8.0, help="CUSUM decision interval (sigmas)")
+    changepoints.add_argument("--tolerance", type=int, default=5, help="match tolerance vs. synthetic truth")
+    changepoints.add_argument("--n-points", type=int, default=800, help="synthetic series length")
+    changepoints.add_argument("--seed", type=int, default=0)
+    changepoints.set_defaults(func=_cmd_changepoints)
 
     report = sub.add_parser("report", help="run the full pipeline and write a markdown report")
     report.add_argument("--n-samples", type=int, default=500)

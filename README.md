@@ -23,6 +23,9 @@ readable and easy to extend.
 - **Time-series subsequences** — Seasonal Hybrid ESD and matrix-profile
   discords (STOMP self-join, z-normalised distance) for anomalous *shapes*
   rather than single extreme points.
+- **Change points** — Bayesian online change-point detection (BOCPD,
+  Normal-Gamma model) and a self-starting two-sided CUSUM for level and
+  variance shifts, where each value is ordinary but the regime changed.
 - **Models** — an isolation forest with random feature/split trees and
   path-length scoring, a local outlier factor with kNN
   reachability-density ratios, k-nearest neighbours (k-th neighbour
@@ -59,7 +62,7 @@ readable and easy to extend.
   sweep with best-F1 selection, and a comparison table across detectors.
 - **Reports** — markdown renderer with per-detector score summaries, top
   flagged rows, sweep tables and caveats.
-- **CLI** — `simulate`, `detect`, `evaluate`, `report` subcommands.
+- **CLI** — `simulate`, `detect`, `evaluate`, `discords`, `changepoints`, `report` subcommands.
 
 
 ## GMM (Gaussian mixture)
@@ -138,6 +141,49 @@ matrix_profile_discords(values, window=40, k=3)   # [(start, distance), ...]
 ```bash
 anomaly-detect discords --window 40 --k 3                 # synthetic demo
 anomaly-detect discords --data series.csv --column value --window 96
+```
+
+## Change points (BOCPD and CUSUM)
+
+A level shift is invisible to point detectors: after the shift every value is
+unremarkable, only the regime moved. `anomaly_detection.changepoint` adds:
+
+- `bocpd(values, hazard=1/250, lag=10)` runs Adams & MacKay (2007) Bayesian
+  online change-point detection. It uses a Normal-Gamma conjugate model, so
+  the mean and variance of each regime are unknown, plus a constant hazard.
+  - The run length `r_t` counts the points of the current regime, including
+    `x_t`.
+  - It returns the predictive surprise `-log p(x_t | x_<t)` (a point-anomaly
+    score), the MAP and expected run lengths, and the log evidence.
+  - It also returns a lagged change-point probability
+    `P(regime started at s | x_<=s+lag)`.
+  - The regime start is uncertain by a step or two, so detection uses the
+    mass within `radius` of `s` (`changepoint_score`).
+  - Priors default to the median and the MAD-based scale.
+  - `max_run_length` truncates the support for long series.
+- `cusum(values, k=0.5, h=8)` is Page's two-sided tabular CUSUM on robustly
+  standardised values.
+  - Each alarm records when it fired, the estimated change start (the last
+    zero of the statistic) and its direction.
+  - After an alarm it re-learns the new regime's level online
+    (self-starting).
+  - `h=5` is the textbook choice, with a two-sided in-control ARL ≈ 465. The
+    default `h=8` trades a few points of delay for far fewer false alarms.
+- `changepoint_hits(detected, truth, tolerance)` gives precision, recall and
+  F1 within a tolerance, where each true change can be matched only once.
+
+```python
+from anomaly_detection.changepoint import bocpd, cusum
+
+res = bocpd(values, hazard=1 / 200)
+res.changepoints               # e.g. [200, 400, 600]
+res.changepoint_score          # posterior mass on a regime start near each index
+cusum(values).alarms           # [CusumAlarm(alarm_index, start_index, direction), ...]
+```
+
+```bash
+anomaly-detect changepoints                      # synthetic demo with known change points
+anomaly-detect changepoints --data series.csv --column value --method bocpd --hazard 0.002
 ```
 
 ## Installation
