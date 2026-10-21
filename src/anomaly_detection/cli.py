@@ -7,6 +7,7 @@ Subcommands:
 * ``evaluate``  -- compare every detector on labelled data and print metrics,
 * ``discords``  -- top-k anomalous subsequences via the matrix profile,
 * ``changepoints`` -- level/variance change points via BOCPD and CUSUM,
+* ``ensemble``  -- combine several detectors (average/max/median/AOM/MOA/LSCP),
 * ``report``    -- full pipeline (simulate + evaluate + markdown report).
 """
 
@@ -21,6 +22,7 @@ import numpy as np
 
 from . import report as rep
 from .changepoint import bocpd, changepoint_hits, cusum
+from .combination import COMBINATION_METHODS, combine_scores, lscp_scores
 from .classic import STATISTICAL_SCORERS, matrix_profile_discords
 from .evaluate import best_f1_threshold, compare_detectors, evaluate_scores, threshold_sweep
 from .generators import make_tabular
@@ -302,6 +304,40 @@ def _cmd_changepoints(args: argparse.Namespace) -> None:
         raise SystemExit(f"changepoints: {exc}")
 
 
+def _cmd_ensemble(args: argparse.Namespace) -> None:
+    X, y, _ = _read_labeled(args.data)
+    names = [n.strip() for n in args.detectors.split(",") if n.strip()]
+    unknown = [n for n in names if n not in DETECTOR_NAMES]
+    if unknown:
+        raise SystemExit(f"ensemble: unknown detector(s) {', '.join(unknown)}; choose from {', '.join(DETECTOR_NAMES)}")
+    if len(names) < 2:
+        raise SystemExit("ensemble: need at least two detectors")
+    M = np.column_stack([_detector_scores(n, X, args.seed) for n in names])
+    try:
+        if args.method == "lscp":
+            combined = lscp_scores(
+                X, M, n_neighbors=min(args.neighbors, X.shape[0] - 1),
+                pseudo_target=args.pseudo_target, standardize=args.standardize,
+            ).scores
+        else:
+            combined = combine_scores(
+                M, args.method, standardize=args.standardize, n_buckets=args.buckets,
+                bucket_method=args.bucket_method, seed=args.seed,
+            )
+    except ValueError as exc:
+        raise SystemExit(f"ensemble: {exc}")
+    flags = _flags_from_contamination(combined, args.contamination)
+    line = f"ensemble[{args.method}] of {','.join(names)}: flagged {int(flags.sum())} of {len(X)}"
+    if y is not None:
+        m = evaluate_scores(y, combined, contamination=args.contamination)
+        line += f" (precision={m['precision']:.3f}, recall={m['recall']:.3f}, f1={m['f1']:.3f}, auc={m['auc']:.3f})"
+    print(line)
+    if y is not None:
+        for j, n in enumerate(names):
+            m = evaluate_scores(y, M[:, j], contamination=args.contamination)
+            print(f"  {n}: f1={m['f1']:.3f}, auc={m['auc']:.3f}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="anomaly-detect",
@@ -361,6 +397,20 @@ def build_parser() -> argparse.ArgumentParser:
     changepoints.add_argument("--n-points", type=int, default=800, help="synthetic series length")
     changepoints.add_argument("--seed", type=int, default=0)
     changepoints.set_defaults(func=_cmd_changepoints)
+
+    ensemble = sub.add_parser("ensemble", help="combine several detectors' scores into one ensemble score")
+    ensemble.add_argument("--data", required=True)
+    ensemble.add_argument("--detectors", default="knn,lof,hbos,ecod,isolation_forest",
+                          help="comma-separated detector names")
+    ensemble.add_argument("--method", choices=list(COMBINATION_METHODS) + ["lscp"], default="average")
+    ensemble.add_argument("--standardize", choices=["zscore", "rank", "minmax", "none"], default="zscore")
+    ensemble.add_argument("--buckets", type=int, default=5, help="AOM/MOA bucket count")
+    ensemble.add_argument("--bucket-method", choices=["static", "dynamic"], default="static")
+    ensemble.add_argument("--neighbors", type=int, default=30, help="LSCP local region size")
+    ensemble.add_argument("--pseudo-target", choices=["max", "average"], default="max")
+    ensemble.add_argument("--contamination", type=float, default=0.1)
+    ensemble.add_argument("--seed", type=int, default=0)
+    ensemble.set_defaults(func=_cmd_ensemble)
 
     report = sub.add_parser("report", help="run the full pipeline and write a markdown report")
     report.add_argument("--n-samples", type=int, default=500)
