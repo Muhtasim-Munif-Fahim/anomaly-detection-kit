@@ -186,6 +186,41 @@ anomaly-detect changepoints                      # synthetic demo with known cha
 anomaly-detect changepoints --data series.csv --column value --method bocpd --hazard 0.002
 ```
 
+## Outlier-score ensembles (average / max / median / AOM / MOA / LSCP)
+
+Detectors disagree, and their scores sit on different scales. The
+`combination` module standardises a `(n_samples, n_detectors)` score matrix
+(z-score, ECDF rank or min-max, optionally using statistics from a training
+score matrix) and then combines the columns:
+
+- `average_scores` (optionally weighted), `max_scores`, `median_scores`;
+- `aom_scores`: *average of maximum*, the max within random detector buckets
+  averaged across buckets;
+- `moa_scores`: *maximum of average*, the dual of AOM (Aggarwal & Sathe, 2015).
+  Buckets are `static` (disjoint, equal-sized) or `dynamic` (random sizes),
+  or you can pass them explicitly with `buckets=[[...], ...]`;
+- `lscp_scores`: LSCP-style locally selective combination. For each point
+  it takes the k nearest training points, builds a pseudo ground truth
+  (max or average of the standardised scores), and keeps the detector(s)
+  whose local scores correlate best with it.
+
+```python
+import numpy as np
+from anomaly_detection.combination import combine_scores, lscp_scores
+from anomaly_detection.models import HBOS, KNN, LocalOutlierFactor
+
+M = np.column_stack([d.fit(X).score_samples(X) for d in (KNN(), LocalOutlierFactor(), HBOS())])
+aom = combine_scores(M, "aom", n_buckets=3, bucket_method="dynamic", seed=0)
+lscp = lscp_scores(X, M, n_neighbors=30).scores
+```
+
+```bash
+anomaly-detect ensemble --data data.csv --detectors knn,lof,hbos,ecod --method aom --buckets 2
+```
+
+With explicit buckets, the z-score standardiser and the average/max/median/AOM/MOA
+combiners reproduce PyOD/combo (`combo.models.score_comb`) exactly.
+
 ## Installation
 
 Requires Python 3.9+ and numpy.
@@ -326,6 +361,7 @@ src/anomaly_detection/
 ├── generators.py   # seeded synthetic data (tabular + time series)
 ├── classic.py      # statistical baselines incl. GESD, S-H-ESD, matrix-profile discords
 ├── models.py       # isolation forest, LOF, kNN, COPOD, ECOD, HBOS, one-class SVM, EllipticEnvelope, CBLOF, LODA, ABOD, COF, SOD, PCA, KDE, SOS, GMM, INNE
+├── combination.py  # score standardisation + average/max/median/AOM/MOA/LSCP ensembles
 ├── evaluate.py     # metrics, threshold sweep, comparison
 ├── report.py       # markdown rendering
 └── cli.py          # command line interface
