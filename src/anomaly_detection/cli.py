@@ -304,6 +304,49 @@ def _cmd_changepoints(args: argparse.Namespace) -> None:
         raise SystemExit(f"changepoints: {exc}")
 
 
+def _synthetic_spikes(n: int, seed: int, drift: float):
+    """Gaussian noise with optional linear drift and four injected spikes."""
+    rng = np.random.default_rng(seed)
+    values = rng.normal(size=n) + np.linspace(0.0, drift, n)
+    idx = sorted(int(i) for i in rng.choice(np.arange(n // 2, n), size=4, replace=False))
+    for k, i in enumerate(idx):
+        values[i] += 7.0 if k % 2 == 0 else -7.0
+    return values, idx
+
+
+def _cmd_evt(args: argparse.Namespace) -> None:
+    from .evt import DSPOT, SPOT
+
+    truth = None
+    if args.data:
+        values, source = _series_from_csv(args.data, args.column)
+    else:
+        values, truth = _synthetic_spikes(args.n_points, args.seed, args.drift)
+        source = f"synthetic spikes (n={args.n_points}, drift={args.drift}, true anomalies {truth})"
+    n_init = int(args.init_fraction * values.size)
+    print(f"evt thresholds: {source}")
+    try:
+        if args.method == "dspot":
+            model = DSPOT(depth=args.depth, q=args.q, level=args.level, side=args.side)
+        else:
+            model = SPOT(q=args.q, level=args.level, side=args.side)
+        model.fit(values[:n_init])
+        res = model.run(values[n_init:])
+    except ValueError as exc:
+        raise SystemExit(f"evt: {exc}")
+    alarms = [a + n_init for a in res.alarms]
+    print(f"  {args.method} (q={args.q}, level={args.level}, side={args.side}, calibration={n_init} points)")
+    if res.upper_thresholds is not None:
+        print(f"    final upper threshold = {res.upper_thresholds[-1]:.4f}")
+    if res.lower_thresholds is not None:
+        print(f"    final lower threshold = {res.lower_thresholds[-1]:.4f}")
+    shown = alarms if len(alarms) <= 20 else alarms[:20] + ["..."]
+    print(f"    alarms ({len(alarms)}): {shown}")
+    if truth is not None:
+        hit = len(set(alarms) & set(truth))
+        print(f"    detected {hit}/{len(truth)} injected anomalies, {len(alarms) - hit} false alarms")
+
+
 def _cmd_ensemble(args: argparse.Namespace) -> None:
     X, y, _ = _read_labeled(args.data)
     names = [n.strip() for n in args.detectors.split(",") if n.strip()]
@@ -397,6 +440,20 @@ def build_parser() -> argparse.ArgumentParser:
     changepoints.add_argument("--n-points", type=int, default=800, help="synthetic series length")
     changepoints.add_argument("--seed", type=int, default=0)
     changepoints.set_defaults(func=_cmd_changepoints)
+
+    evt = sub.add_parser("evt", help="streaming extreme-value thresholds (SPOT / DSPOT)")
+    evt.add_argument("--data", default=None, help="CSV with a header; default: synthetic spikes")
+    evt.add_argument("--column", default=None, help="column name or index (default: last feature)")
+    evt.add_argument("--method", choices=["spot", "dspot"], default="spot")
+    evt.add_argument("--q", type=float, default=1e-4, help="target risk (false-alarm probability)")
+    evt.add_argument("--level", type=float, default=0.98, help="initial-threshold quantile")
+    evt.add_argument("--side", choices=["upper", "lower", "both"], default="both")
+    evt.add_argument("--depth", type=int, default=20, help="DSPOT moving-average window")
+    evt.add_argument("--init-fraction", type=float, default=0.25, help="calibration share of the series")
+    evt.add_argument("--drift", type=float, default=0.0, help="synthetic linear drift over the series")
+    evt.add_argument("--n-points", type=int, default=4000, help="synthetic series length")
+    evt.add_argument("--seed", type=int, default=0)
+    evt.set_defaults(func=_cmd_evt)
 
     ensemble = sub.add_parser("ensemble", help="combine several detectors' scores into one ensemble score")
     ensemble.add_argument("--data", required=True)

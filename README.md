@@ -221,6 +221,38 @@ anomaly-detect ensemble --data data.csv --detectors knn,lof,hbos,ecod --method a
 With explicit buckets, the z-score standardiser and the average/max/median/AOM/MOA
 combiners reproduce PyOD/combo (`combo.models.score_comb`) exactly.
 
+## Extreme-value thresholds (POT / SPOT / DSPOT)
+
+`anomaly_detection.evt` sets alarm thresholds from extreme-value theory rather than a
+hand-picked contamination rate. You choose a risk `q`, the probability that a normal
+point is flagged. Peaks over an initial empirical quantile `t` (set by `level`) are fit
+with a generalized Pareto distribution. The fit is the exact maximum likelihood estimate
+from Grimshaw's reduction to a one-dimensional root search, and it matches
+`scipy.stats.genpareto.fit(floc=0)`. The threshold is
+`z_q = t + sigma/gamma * ((q n / N_t)^(-gamma) - 1)`, following Siffer et al., KDD 2017.
+
+- `fit_gpd(excesses)` returns `(gamma, sigma, log_likelihood)`. `gpd_quantile(...)` gives the POT quantile.
+- `pot(values, q, level)` computes a static threshold. `evt_flags(scores, q, level)` flags any detector's scores.
+- `SPOT(q, level, side="upper"|"lower"|"both")` is the streaming version. Call `.fit(calibration)`, then `.run(stream)`.
+  Normal peaks update the tail fit. Alarms are kept out of the model.
+- `DSPOT(depth, ...)` runs SPOT on `x_t - mean(last depth normal points)`, which makes it robust to drift.
+
+```python
+from anomaly_detection.evt import DSPOT, SPOT, evt_flags
+
+res = SPOT(q=1e-4, side="both").fit(series[:1000]).run(series[1000:])
+res.alarms, res.upper_thresholds, res.lower_thresholds
+flags, z = evt_flags(iforest_scores, q=1e-3)
+```
+
+```bash
+python -m anomaly_detection.cli evt                                   # SPOT on synthetic spikes
+python -m anomaly_detection.cli evt --method dspot --drift 15         # drifting series
+python -m anomaly_detection.cli evt --data series.csv --column value --side upper --q 1e-3
+```
+
+The 1-D GPD fit assumes `gamma > -1`. Below that the likelihood is unbounded.
+
 ## Installation
 
 Requires Python 3.9+ and numpy.
