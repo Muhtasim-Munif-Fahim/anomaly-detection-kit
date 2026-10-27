@@ -2832,3 +2832,249 @@ class ExtendedIsolationForest:
 
     def fit_predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
         return self.fit(X).predict(X, contamination=contamination)
+
+
+class HalfSpaceTrees:
+    """Streaming Half-Space Trees (Tan, Ting & Liu, 2011).
+
+    An ensemble of ``n_estimators`` *complete* binary trees of depth
+    ``max_depth`` is built **without looking at the data values**: every
+    internal node bisects its current work range along a random feature.
+    Each tree gets its own randomly perturbed work space: for every feature
+    a split point ``s`` is drawn uniformly within the observed range
+    ``[lo, hi]`` and the work range is ``s +/- 2 * max(s - lo, hi - s)``,
+    so the whole data range is always covered.
+
+    Every node keeps two mass counters: ``r`` (the *reference* window) and
+    ``l`` (the *latest* window). A point is scored against the reference
+    profile: it descends each tree until it reaches a leaf or a node whose
+    reference mass is below ``size_limit``, and that tree contributes
+    ``r * 2**depth``. Low mass means few reference points lived in that
+    region, i.e. an anomaly. Scores reported here are
+    ``log2(1 + max_mass) - log2(1 + mean_mass)`` where
+    ``max_mass = window_size * 2**max_depth``, so they are non-negative and
+    **higher is more anomalous**, like the other detectors.
+
+    Streaming use: :meth:`learn_one` adds a point to the latest window; when
+    ``window_size`` points have arrived the latest masses become the new
+    reference and the latest counters reset, which lets the model follow
+    concept drift in constant memory. :meth:`score_stream` does the usual
+    test-then-train pass and returns ``NaN`` while no reference exists yet.
+    Batch use: :meth:`fit` uses every row of ``X`` as the reference window.
+
+    Parameters
+    ----------
+    n_estimators:
+        Number of trees (paper default 25).
+    max_depth:
+        Depth ``h`` of every tree (paper default 15; 10 is plenty for small
+        data). Each tree has ``2**(h+1) - 1`` nodes.
+    window_size:
+        Points per streaming window (paper default 250).
+    size_limit:
+        Minimum reference mass for descending further; defaults to
+        ``0.1 * window_size`` as in the paper.
+    feature_range:
+        Optional ``(lo, hi)`` arrays (or scalars) bounding the features for
+        streaming without a warm-up ``fit``. ``fit`` infers it from ``X``.
+    seed:
+        RNG seed for the tree structure.
+    """
+
+    def __init__(
+        self,
+        n_estimators: int = 25,
+        max_depth: int = 10,
+        window_size: int = 250,
+        size_limit: Optional[float] = None,
+        feature_range=None,
+        seed: Optional[int] = 0,
+    ) -> None:
+        for name, value, low in (("n_estimators", n_estimators, 1), ("max_depth", max_depth, 1), ("window_size", window_size, 1)):
+            if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < low:
+                raise ValueError(f"{name} must be a positive integer")
+        if max_depth > 20:
+            raise ValueError("max_depth must be <= 20 (trees are stored densely)")
+        if size_limit is not None and (not np.isfinite(size_limit) or size_limit < 0):
+            raise ValueError("size_limit must be a non-negative number")
+        self.n_estimators = int(n_estimators)
+        self.max_depth = int(max_depth)
+        self.window_size = int(window_size)
+        self.size_limit = size_limit
+        self.feature_range = feature_range
+        self.seed = seed
+        self._n_features: Optional[int] = None
+        self.split_dim_: Optional[np.ndarray] = None
+        self.split_val_: Optional[np.ndarray] = None
+        self.r_mass_: Optional[np.ndarray] = None
+        self.l_mass_: Optional[np.ndarray] = None
+        self.reference_size_ = 0
+        self.n_seen_in_window_ = 0
+        self.n_windows_ = 0
+        self.scores_: Optional[np.ndarray] = None
+
+    # -- structure -------------------------------------------------------
+    def _build(self, lo: np.ndarray, hi: np.ndarray) -> None:
+        d = lo.shape[0]
+        rng = np.random.default_rng(self.seed)
+        n_internal = 2 ** self.max_depth - 1
+        n_nodes = 2 ** (self.max_depth + 1) - 1
+        split_dim = np.zeros((self.n_estimators, n_internal), dtype=np.int64)
+        split_val = np.zeros((self.n_estimators, n_internal), dtype=float)
+        span = np.where(hi > lo, hi - lo, 1.0)
+        for t in range(self.n_estimators):
+            s = lo + rng.random(d) * span
+            half = 2.0 * np.maximum(s - lo, lo + span - s)
+            node_lo = np.empty((n_nodes, d))
+            node_hi = np.empty((n_nodes, d))
+            node_lo[0], node_hi[0] = s - half, s + half
+            for i in range(n_internal):
+                q = int(rng.integers(d))
+                mid = 0.5 * (node_lo[i, q] + node_hi[i, q])
+                split_dim[t, i], split_val[t, i] = q, mid
+                for child, side in ((2 * i + 1, "left"), (2 * i + 2, "right")):
+                    node_lo[child], node_hi[child] = node_lo[i], node_hi[i]
+                    if side == "left":
+                        node_hi[child, q] = mid
+                    else:
+                        node_lo[child, q] = mid
+        self.split_dim_, self.split_val_ = split_dim, split_val
+        self.r_mass_ = np.zeros((self.n_estimators, n_nodes))
+        self.l_mass_ = np.zeros((self.n_estimators, n_nodes))
+        self._n_features = d
+        self.reference_size_ = 0
+        self.n_seen_in_window_ = 0
+        self.n_windows_ = 0
+
+    def _ensure_built(self, d: int) -> None:
+        if self.split_dim_ is not None:
+            return
+        if self.feature_range is None:
+            raise ValueError("call fit() first or pass feature_range=(lo, hi) for pure streaming")
+        lo, hi = self.feature_range
+        lo = np.broadcast_to(np.asarray(lo, dtype=float), (d,)).copy()
+        hi = np.broadcast_to(np.asarray(hi, dtype=float), (d,)).copy()
+        if np.any(hi < lo):
+            raise ValueError("feature_range must satisfy lo <= hi")
+        self._build(lo, hi)
+
+    def _paths(self, X: np.ndarray) -> np.ndarray:
+        """Node index at every depth for every tree: shape (trees, depth+1, n)."""
+        n = X.shape[0]
+        paths = np.zeros((self.n_estimators, self.max_depth + 1, n), dtype=np.int64)
+        rows = np.arange(n)
+        for t in range(self.n_estimators):
+            node = np.zeros(n, dtype=np.int64)
+            for k in range(1, self.max_depth + 1):
+                q = self.split_dim_[t, node]
+                go_right = X[rows, q] >= self.split_val_[t, node]
+                node = 2 * node + 1 + go_right.astype(np.int64)
+                paths[t, k] = node
+        return paths
+
+    def _check_X(self, X) -> np.ndarray:
+        X = np.asarray(X, dtype=float)
+        if X.ndim == 1:
+            X = X.reshape(1, -1)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array of shape (n_samples, n_features)")
+        if X.shape[1] < 1:
+            raise ValueError("HalfSpaceTrees needs at least one feature")
+        if not np.all(np.isfinite(X)):
+            raise ValueError("X must contain only finite values")
+        if self._n_features is not None and X.shape[1] != self._n_features:
+            raise ValueError(
+                f"X has {X.shape[1]} features, but HalfSpaceTrees was built for {self._n_features}"
+            )
+        return X
+
+    def _limit(self) -> float:
+        if self.size_limit is not None:
+            return float(self.size_limit)
+        return 0.1 * (self.reference_size_ or self.window_size)
+
+    def _mass(self, X: np.ndarray) -> np.ndarray:
+        paths = self._paths(X)
+        limit = self._limit()
+        n = X.shape[0]
+        total = np.zeros(n)
+        for t in range(self.n_estimators):
+            r = self.r_mass_[t][paths[t]]  # (depth+1, n)
+            below = r < limit
+            # first depth whose reference mass is below the limit, else the leaf
+            stop = np.where(below.any(axis=0), below.argmax(axis=0), self.max_depth)
+            total += r[stop, np.arange(n)] * (2.0 ** stop)
+        return total / self.n_estimators
+
+    def _to_scores(self, mass: np.ndarray) -> np.ndarray:
+        ref = self.reference_size_ or self.window_size
+        max_mass = ref * 2.0 ** self.max_depth
+        return np.log2(1.0 + max_mass) - np.log2(1.0 + mass)
+
+    # -- public API ------------------------------------------------------
+    def fit(self, X: np.ndarray) -> "HalfSpaceTrees":
+        """Build the trees on the range of ``X`` and use ``X`` as reference."""
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2 or X.shape[0] < 1:
+            raise ValueError("X must be a non-empty 2-D array")
+        self._n_features = None
+        self.split_dim_ = None
+        X = self._check_X(X)
+        if self.feature_range is not None:
+            self._ensure_built(X.shape[1])
+        else:
+            self._build(X.min(axis=0), X.max(axis=0))
+        paths = self._paths(X)
+        for t in range(self.n_estimators):
+            np.add.at(self.r_mass_[t], paths[t].ravel(), 1.0)
+        self.reference_size_ = X.shape[0]
+        self.n_windows_ = 1
+        self.scores_ = self.score_samples(X)
+        return self
+
+    def score_samples(self, X: np.ndarray) -> np.ndarray:
+        if self.split_dim_ is None:
+            raise ValueError("HalfSpaceTrees must be fitted before scoring")
+        X = self._check_X(X)
+        if self.reference_size_ == 0:
+            return np.full(X.shape[0], np.nan)
+        return self._to_scores(self._mass(X))
+
+    def score_one(self, x) -> float:
+        return float(self.score_samples(np.asarray(x, dtype=float).reshape(1, -1))[0])
+
+    def learn_one(self, x) -> "HalfSpaceTrees":
+        """Add one point to the latest window, rolling windows when full."""
+        x = np.asarray(x, dtype=float).reshape(1, -1)
+        self._ensure_built(x.shape[1])
+        x = self._check_X(x)
+        paths = self._paths(x)[:, :, 0]
+        for t in range(self.n_estimators):
+            self.l_mass_[t, paths[t]] += 1.0
+        self.n_seen_in_window_ += 1
+        if self.n_seen_in_window_ >= self.window_size:
+            self.r_mass_ = self.l_mass_
+            self.l_mass_ = np.zeros_like(self.r_mass_)
+            self.reference_size_ = self.n_seen_in_window_
+            self.n_seen_in_window_ = 0
+            self.n_windows_ += 1
+        return self
+
+    def score_stream(self, X: np.ndarray) -> np.ndarray:
+        """Prequential pass: score each row, then learn it."""
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2-D array of shape (n_samples, n_features)")
+        if X.shape[0]:
+            self._ensure_built(X.shape[1])
+        out = np.empty(X.shape[0])
+        for i, x in enumerate(X):
+            out[i] = self.score_one(x)
+            self.learn_one(x)
+        return out
+
+    def predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
+        return _flags_from_contamination(self.score_samples(X), contamination)
+
+    def fit_predict(self, X: np.ndarray, contamination: float = 0.1) -> np.ndarray:
+        return self.fit(X).predict(X, contamination=contamination)

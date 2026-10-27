@@ -198,6 +198,7 @@ class TestParser:
             "gmm",
             "inne",
             "eif",
+            "hst",
             "zscore",
             "mad",
             "iqr",

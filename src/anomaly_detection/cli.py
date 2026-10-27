@@ -46,11 +46,12 @@ from .models import (
     GMM,
     INNE,
     ExtendedIsolationForest,
+    HalfSpaceTrees,
     _flags_from_contamination,
 )
 
 STATISTICAL_ALIASES = {"zscore": "z-score", "mad": "modified z-score", "iqr": "IQR"}
-MODEL_NAMES = ["isolation_forest", "lof", "copod", "ecod", "hbos", "knn", "ocsvm", "elliptic", "cblof", "loda", "abod", "cof", "sod", "pca", "kde", "sos", "gmm", "inne", "eif"]
+MODEL_NAMES = ["isolation_forest", "lof", "copod", "ecod", "hbos", "knn", "ocsvm", "elliptic", "cblof", "loda", "abod", "cof", "sod", "pca", "kde", "sos", "gmm", "inne", "eif", "hst"]
 DETECTOR_NAMES = MODEL_NAMES + list(STATISTICAL_ALIASES)
 
 
@@ -93,6 +94,8 @@ def _detector_scores(name: str, X: np.ndarray, seed: Optional[int]) -> np.ndarra
         return INNE(seed=0 if seed is None else seed).fit(X).score_samples(X)
     if name == "eif":
         return ExtendedIsolationForest(seed=0 if seed is None else seed).fit(X).score_samples(X)
+    if name == "hst":
+        return HalfSpaceTrees(seed=0 if seed is None else seed).fit(X).score_samples(X)
     return STATISTICAL_SCORERS[STATISTICAL_ALIASES[name]](X)
 
 
