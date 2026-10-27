@@ -4,7 +4,7 @@ A dependency-light (numpy-only) set of detectors, evaluators and report
 utilities for spotting unusual rows in tabular data and point/level-shift
 anomalies in time series, plus BOCPD and CUSUM change-point detection, extreme-value (POT/SPOT/DSPOT) thresholds and outlier-score ensembles
 (average/max/median/AOM/MOA/LSCP). Model-based detectors include isolation forest,
-local outlier factor, k-nearest neighbours, COPOD, ECOD, HBOS, one-class SVM, EllipticEnvelope (FAST-MCD), CBLOF, LODA, ABOD, COF, SOD, PCA, KDE, SOS, GMM, INNE and Extended Isolation Forest.
+local outlier factor, k-nearest neighbours, COPOD, ECOD, HBOS, one-class SVM, EllipticEnvelope (FAST-MCD), CBLOF, LODA, ABOD, COF, SOD, PCA, KDE, SOS, GMM, INNE, Extended Isolation Forest and streaming Half-Space Trees.
 """
 
 from . import changepoint, classic, combination, evaluate, evt, generators, models, report

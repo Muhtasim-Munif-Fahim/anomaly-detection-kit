@@ -119,6 +119,31 @@ scores = eif.score_samples(X)              # (0, 1], higher = more anomalous
 axis = ExtendedIsolationForest(extension_level=0, seed=0).fit(X)
 ```
 
+## Streaming Half-Space Trees
+
+`HalfSpaceTrees` (Tan, Ting & Liu, 2011) is a one-pass detector for streams.
+Each tree splits a random feature at the midpoint of a randomly perturbed
+work range, so the tree structure does not depend on the data. Nodes hold two
+mass counters. `r_mass` is the reference profile from the last full window and
+`l_mass` counts the window currently being filled. When `window_size` points
+have been learned, the latest masses become the reference and the counters
+reset, so the model follows concept drift. A point descends until a node's
+reference mass is `<= size_limit` or `max_depth` is reached, and it gets
+`log2(1 + max_mass) - log2(1 + mean(r_mass * 2^depth))`. This is the
+paper's `r * 2^k` mass flipped so that **higher = more anomalous**. Scores are
+NaN until the first window has completed. Pass `feature_range=(lo, hi)` for
+pure streaming. Otherwise `fit(X)` sets the range from `X` and uses all of `X`
+as the reference window.
+
+```python
+from anomaly_detection.models import HalfSpaceTrees
+
+hst = HalfSpaceTrees(n_estimators=25, max_depth=10, window_size=250,
+                     feature_range=(-5, 5), seed=0)
+scores = hst.score_stream(stream)   # score-then-learn, rolling windows
+batch = HalfSpaceTrees(seed=0).fit(X).score_samples(X)
+```
+
 ## Matrix-profile discords (anomalous subsequences)
 
 Point detectors miss anomalies whose individual values are ordinary but whose
@@ -380,6 +405,7 @@ Or without installing: `python -m anomaly_detection <command> ...`.
 | KDE               | model         | higher = more anomalous                | `bandwidth`, `standardize`  |
 | GMM               | model         | higher = more anomalous                | `n_components`, `seed`      |
 | INNE              | model         | higher = more anomalous, in [0, 1]     | `n_estimators`, `max_samples`|
+| Half-Space Trees  | streaming     | higher = more anomalous (log mass)     | `window_size`, `max_depth`  |
 | z-score           | statistical   | max abs z per row                       | `threshold` (default 3.0)   |
 | Modified z-score  | statistical   | median/MAD robust z                    | `threshold` (default 3.5)   |
 | IQR fences        | statistical   | distance beyond fence / IQR            | `k` (default 1.5)           |
