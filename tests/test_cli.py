@@ -199,6 +199,7 @@ class TestParser:
             "inne",
             "eif",
             "hst",
+            "rrcf",
             "zscore",
             "mad",
             "iqr",
