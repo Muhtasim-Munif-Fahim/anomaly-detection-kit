@@ -144,6 +144,41 @@ scores = hst.score_stream(stream)   # score-then-learn, rolling windows
 batch = HalfSpaceTrees(seed=0).fit(X).score_samples(X)
 ```
 
+## Robust Random Cut Forest (CoDisp)
+
+`RobustRandomCutForest` (Guha et al., ICML 2016) lives in
+`anomaly_detection.rrcf`. Each robust random cut tree picks a cut dimension
+with probability proportional to its bounding-box span and a cut value
+uniformly inside it. Trees support **exact insert and delete**, so a tree
+grown point by point has the same distribution as one built in one go. The
+score is the *collusive displacement*. Walking from a point's leaf to the
+root, it is the largest ratio `|sibling subtree| / |subtree holding the
+point|`, averaged over the forest. **Higher means more anomalous.**
+
+- Batch: `fit(X)` builds every tree on a `tree_size` subsample. `scores_` is
+  each row's mean CoDisp over the trees that hold it, and
+  `score_samples(X_new)` inserts, scores and deletes each row, so the forest
+  is not changed.
+- Streaming: `score_stream(X)` / `update(x)` keep a sliding window of
+  `tree_size` points per tree (forget the oldest, insert the newest, return
+  its CoDisp). `shingle(series, size)` turns a univariate series into
+  overlapping windows so that odd *shapes* are scored as well as spikes.
+- `RandomCutTree` is exposed for direct use (`build`, `insert`, `forget`,
+  `codisp`, `depth`, `check`). Identical points share a leaf and keep a count.
+
+```python
+from anomaly_detection.rrcf import RobustRandomCutForest, shingle
+
+forest = RobustRandomCutForest(n_estimators=40, tree_size=256, seed=0).fit(X)
+train_scores = forest.scores_
+new_scores = forest.score_samples(X_new)
+
+stream = RobustRandomCutForest(n_estimators=40, tree_size=256, seed=0)
+codisp = stream.score_stream(shingle(series, 4))
+```
+
+The `rrcf` detector is also available in the CLI (`detect`/`evaluate`/`ensemble`).
+
 ## Matrix-profile discords (anomalous subsequences)
 
 Point detectors miss anomalies whose individual values are ordinary but whose
@@ -406,6 +441,7 @@ Or without installing: `python -m anomaly_detection <command> ...`.
 | GMM               | model         | higher = more anomalous                | `n_components`, `seed`      |
 | INNE              | model         | higher = more anomalous, in [0, 1]     | `n_estimators`, `max_samples`|
 | Half-Space Trees  | streaming     | higher = more anomalous (log mass)     | `window_size`, `max_depth`  |
+| Robust Random Cut Forest | streaming | higher = more anomalous (CoDisp) | `n_estimators`, `tree_size` |
 | z-score           | statistical   | max abs z per row                       | `threshold` (default 3.0)   |
 | Modified z-score  | statistical   | median/MAD robust z                    | `threshold` (default 3.5)   |
 | IQR fences        | statistical   | distance beyond fence / IQR            | `k` (default 1.5)           |
@@ -418,6 +454,7 @@ Or without installing: `python -m anomaly_detection <command> ...`.
 src/anomaly_detection/
 ├── generators.py   # seeded synthetic data (tabular + time series)
 ├── classic.py      # statistical baselines incl. GESD, S-H-ESD, matrix-profile discords
+├── rrcf.py       # Robust Random Cut Forest (dynamic trees, CoDisp, shingling)
 ├── models.py       # isolation forest, LOF, kNN, COPOD, ECOD, HBOS, one-class SVM, EllipticEnvelope, CBLOF, LODA, ABOD, COF, SOD, PCA, KDE, SOS, GMM, INNE
 ├── combination.py  # score standardisation + average/max/median/AOM/MOA/LSCP ensembles
 ├── evaluate.py     # metrics, threshold sweep, comparison
