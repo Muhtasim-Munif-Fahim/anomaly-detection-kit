@@ -62,7 +62,7 @@ readable and easy to extend.
   sweep with best-F1 selection, and a comparison table across detectors.
 - **Reports** — markdown renderer with per-detector score summaries, top
   flagged rows, sweep tables and caveats.
-- **CLI** — `simulate`, `detect`, `evaluate`, `discords`, `changepoints`, `report` subcommands.
+- **CLI** — `simulate`, `detect`, `evaluate`, `discords`, `sr`, `changepoints`, `report` subcommands.
 
 
 ## GMM (Gaussian mixture)
@@ -201,6 +201,33 @@ matrix_profile_discords(values, window=40, k=3)   # [(start, distance), ...]
 ```bash
 anomaly-detect discords --window 40 --k 3                 # synthetic demo
 anomaly-detect discords --data series.csv --column value --window 96
+```
+
+## Spectral Residual (time-series point anomalies)
+
+`spectral_residual` implements the unsupervised Spectral Residual (SR)
+saliency detector from Ren et al., *Time-Series Anomaly Detection Service at
+Microsoft* (KDD 2019). The series is moved to the frequency domain, the
+smooth part of the log-amplitude spectrum (a width-`amp_window` moving
+average) is subtracted, and the residual is mapped back with the original
+phase. The result is a **saliency map** in which isolated spikes and dips
+stand out. Each point's score is its saliency relative to the mean of the
+previous `score_window` saliency values, `(S_i - mean) / mean`, and points
+above `threshold` (default 3) are flagged. Before the FFT the series is
+extended by `extend` points estimated from the average recent gradient, so
+the newest points are scored reliably (useful in streaming use).
+
+```python
+from anomaly_detection.spectral_residual import spectral_residual, saliency_map
+
+result = spectral_residual(values, threshold=3.0, amp_window=3, score_window=21)
+result.anomalies      # flagged indices
+result.scores         # per-point SR score, usable with roc_auc / best_f1_threshold
+```
+
+```bash
+anomaly-detect sr                                      # synthetic demo with 3 spikes
+anomaly-detect sr --data series.csv --column value --threshold 4
 ```
 
 ## Change points (BOCPD and CUSUM)
@@ -447,6 +474,7 @@ Or without installing: `python -m anomaly_detection <command> ...`.
 | IQR fences        | statistical   | distance beyond fence / IQR            | `k` (default 1.5)           |
 | Generalized ESD   | time series   | standardised deviation vs t critical   | `k`, `alpha`                |
 | Matrix-profile discords | time series | z-norm distance to nearest neighbour subsequence | `window`, `k`, `exclusion_zone` |
+| Spectral Residual | time series | saliency relative to trailing mean | `threshold`, `amp_window`, `score_window` |
 
 ## Project layout
 
@@ -455,6 +483,7 @@ src/anomaly_detection/
 ├── generators.py   # seeded synthetic data (tabular + time series)
 ├── classic.py      # statistical baselines incl. GESD, S-H-ESD, matrix-profile discords
 ├── rrcf.py       # Robust Random Cut Forest (dynamic trees, CoDisp, shingling)
+├── spectral_residual.py # Spectral Residual saliency detector for series
 ├── models.py       # isolation forest, LOF, kNN, COPOD, ECOD, HBOS, one-class SVM, EllipticEnvelope, CBLOF, LODA, ABOD, COF, SOD, PCA, KDE, SOS, GMM, INNE
 ├── combination.py  # score standardisation + average/max/median/AOM/MOA/LSCP ensembles
 ├── evaluate.py     # metrics, threshold sweep, comparison
