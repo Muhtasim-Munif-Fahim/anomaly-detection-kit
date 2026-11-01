@@ -6,6 +6,7 @@ Subcommands:
 * ``detect``    -- run one or all detectors over a CSV and report flagged rows,
 * ``evaluate``  -- compare every detector on labelled data and print metrics,
 * ``discords``  -- top-k anomalous subsequences via the matrix profile,
+* ``sr``        -- Spectral Residual saliency anomalies in a series,
 * ``changepoints`` -- level/variance change points via BOCPD and CUSUM,
 * ``ensemble``  -- combine several detectors (average/max/median/AOM/MOA/LSCP),
 * ``report``    -- full pipeline (simulate + evaluate + markdown report).
@@ -27,6 +28,7 @@ from .classic import STATISTICAL_SCORERS, matrix_profile_discords
 from .evaluate import best_f1_threshold, compare_detectors, evaluate_scores, threshold_sweep
 from .generators import make_tabular
 from .rrcf import RobustRandomCutForest
+from .spectral_residual import spectral_residual
 from .models import (
     COPOD,
     ECOD,
@@ -114,7 +116,7 @@ def _read_labeled(path: str):
     with open(path, "r", encoding="utf-8") as fh:
         header = fh.readline().strip()
     names = [n for n in header.split(",") if n]
-    data = np.atleast_2d(np.loadtxt(path, delimiter=",", skiprows=1))
+    data = np.loadtxt(path, delimiter=",", skiprows=1, ndmin=2)
     if names and names[-1] == "y_true":
         y = data[:, -1].astype(int)
         X = data[:, :-1]
@@ -261,6 +263,45 @@ def _cmd_discords(args: argparse.Namespace) -> None:
     print(f"matrix-profile discords: {source}, window={args.window}")
     for rank, (start, dist) in enumerate(found, 1):
         print(f"  #{rank}: start={start} end={start + args.window - 1} distance={dist:.4f}")
+
+
+def _synthetic_spiky_series(n: int, period: int, seed: int):
+    """Seasonal series with a few injected point anomalies at known positions."""
+    rng = np.random.default_rng(seed)
+    t = np.arange(n)
+    values = np.sin(2 * np.pi * t / period) + 0.1 * rng.normal(size=n)
+    truth = [n // 5, n // 2, (4 * n) // 5]
+    for k, i in enumerate(truth):
+        values[i] += 3.0 if k % 2 == 0 else -3.0
+    return values, truth
+
+
+def _cmd_sr(args: argparse.Namespace) -> None:
+    truth = None
+    if args.data:
+        values, source = _series_from_csv(args.data, args.column)
+    else:
+        values, truth = _synthetic_spiky_series(args.n_points, args.period, args.seed)
+        source = f"synthetic seasonal series (n={args.n_points}, spikes at {truth})"
+    try:
+        result = spectral_residual(
+            values,
+            threshold=args.threshold,
+            amp_window=args.amp_window,
+            score_window=args.score_window,
+            extend=args.extend,
+        )
+    except ValueError as exc:
+        raise SystemExit(f"sr: {exc}")
+    print(f"spectral residual: {source}, threshold={args.threshold}")
+    order = np.argsort(-result.scores)
+    flagged = [int(i) for i in order if result.flags[i]][: args.top]
+    print(f"  flagged {int(result.flags.sum())} point(s); top {len(flagged)} by score:")
+    for i in flagged:
+        print(f"  index={i} value={values[i]:.4f} score={result.scores[i]:.3f}")
+    if truth is not None:
+        hits = sum(1 for i in truth if result.flags[i])
+        print(f"  recovered {hits}/{len(truth)} injected spikes")
 
 
 def _synthetic_regimes(n: int, seed: int):
@@ -429,6 +470,19 @@ def build_parser() -> argparse.ArgumentParser:
     discords.add_argument("--n-points", type=int, default=600, help="synthetic series length")
     discords.add_argument("--seed", type=int, default=0)
     discords.set_defaults(func=_cmd_discords)
+
+    sr = sub.add_parser("sr", help="point anomalies in a series via Spectral Residual saliency")
+    sr.add_argument("--data", default=None, help="CSV with a header; default: synthetic spiky series")
+    sr.add_argument("--column", default=None, help="column name or index (default: last feature)")
+    sr.add_argument("--threshold", type=float, default=3.0, help="score threshold (default: 3.0)")
+    sr.add_argument("--amp-window", type=int, default=3, help="log-amplitude smoothing window q")
+    sr.add_argument("--score-window", type=int, default=21, help="trailing saliency window z")
+    sr.add_argument("--extend", type=int, default=5, help="points appended before the FFT")
+    sr.add_argument("--top", type=int, default=10, help="print at most this many flagged points")
+    sr.add_argument("--period", type=int, default=50, help="synthetic seasonal period")
+    sr.add_argument("--n-points", type=int, default=800, help="synthetic series length")
+    sr.add_argument("--seed", type=int, default=0)
+    sr.set_defaults(func=_cmd_sr)
 
     changepoints = sub.add_parser(
         "changepoints", help="level/variance change points via BOCPD and/or two-sided CUSUM"
