@@ -308,6 +308,25 @@ anomaly-detect ensemble --data data.csv --detectors knn,lof,hbos,ecod --method a
 With explicit buckets, the z-score standardiser and the average/max/median/AOM/MOA
 combiners reproduce PyOD/combo (`combo.models.score_comb`) exactly.
 
+## Feature bagging (Lazarevic & Kumar 2005)
+
+Distance/density detectors lose contrast when many features are pure
+noise. `FeatureBagging` fits `n_estimators` copies of a base detector
+(default LOF, any detector here works) on random feature subsets of size
+`d/2 .. d-1`, then combines the z-scored member scores with `"average"`,
+`"max"` or the paper's `"breadth_first"` rank interleaving.
+
+```python
+from anomaly_detection import FeatureBagging
+from anomaly_detection.models import KNN
+
+fb = FeatureBagging(base_estimator=KNN(n_neighbors=5), n_estimators=20,
+                    combination="average", seed=0).fit(X)
+scores = fb.score_samples(X)          # higher = more anomalous
+flags = fb.predict(X, contamination=0.05)
+fb.features_                          # feature subset used by each member
+```
+
 ## Extreme-value thresholds (POT / SPOT / DSPOT)
 
 `anomaly_detection.evt` sets alarm thresholds from extreme-value theory rather than a
