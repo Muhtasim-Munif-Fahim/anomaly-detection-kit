@@ -3,11 +3,12 @@
 A dependency-light (numpy-only) set of detectors, evaluators and report
 utilities for spotting unusual rows in tabular data and point/level-shift
 anomalies in time series, plus BOCPD and CUSUM change-point detection, extreme-value (POT/SPOT/DSPOT) thresholds and outlier-score ensembles
-(average/max/median/AOM/MOA/LSCP). Model-based detectors include isolation forest,
+(average/max/median/AOM/MOA/LSCP, feature bagging). Model-based detectors include isolation forest,
 local outlier factor, k-nearest neighbours, COPOD, ECOD, HBOS, one-class SVM, EllipticEnvelope (FAST-MCD), CBLOF, LODA, ABOD, COF, SOD, PCA, KDE, SOS, GMM, INNE, Extended Isolation Forest, streaming Half-Space Trees and Robust Random Cut Forest (CoDisp), plus the Spectral Residual saliency detector for time series.
 """
 
-from . import changepoint, classic, combination, evaluate, evt, generators, models, report, rrcf, spectral_residual
+from . import changepoint, classic, combination, evaluate, evt, feature_bagging, generators, models, report, rrcf, spectral_residual
+from .feature_bagging import FeatureBagging
 from .generators import (
     gaussian_clusters,
     inject_scale_outliers,
@@ -24,6 +25,8 @@ __all__ = [
     "combination",
     "evaluate",
     "evt",
+    "feature_bagging",
+    "FeatureBagging",
     "generators",
     "models",
     "report",
