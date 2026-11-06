@@ -7,7 +7,8 @@ Pure-numpy implementations of the standard baselines:
 * Tukey IQR fences,
 * the generalized ESD test for univariate time series,
 * Seasonal Hybrid ESD (S-H-ESD) for seasonal series,
-* matrix-profile discords (STOMP) for anomalous *subsequences*.
+* matrix-profile discords (STOMP) for anomalous *subsequences*,
+* the Hampel filter (rolling median / MAD) for univariate series.
 
 GESD needs Student-t critical values; the required regularised incomplete
 beta function and its inverse are implemented in this module (``_ibeta``,
@@ -496,3 +497,75 @@ STATISTICAL_SCORERS: Dict[str, object] = {
     "modified z-score": mad_scores,
     "IQR": iqr_scores,
 }
+
+
+# ---------------------------------------------------------------------------
+# Hampel filter (rolling median / MAD)
+# ---------------------------------------------------------------------------
+
+def hampel_filter(
+    values,
+    window: int = 7,
+    n_sigmas: float = 3.0,
+    *,
+    impute: bool = True,
+) -> Dict[str, np.ndarray]:
+    """Hampel filter: flag (and optionally replace) rolling-MAD outliers.
+
+    At each index ``i`` the filter takes the window
+    ``values[i - w : i + w + 1]`` with ``w = window // 2`` (odd ``window``
+    required), computes the local median ``m`` and MAD, and flags ``i`` when
+
+        |x_i - m| > n_sigmas * 1.4826 * MAD
+
+    (Pearson 2002; the ``1.4826`` scale makes the MAD consistent for the
+    normal). Flagged points are replaced by ``m`` when ``impute=True``.
+    Edge windows are truncated rather than padded, so the first and last
+    ``w`` points use fewer neighbours.
+
+    Returns a dict with ``scores`` (scaled absolute deviations), ``flags``
+    (0/1), ``filtered`` (imputed or original series), and ``medians``.
+    """
+    x = np.asarray(values, dtype=float).ravel()
+    if x.size == 0:
+        raise ValueError("values must not be empty")
+    if not np.all(np.isfinite(x)):
+        raise ValueError("values must be finite")
+    if window < 3 or window % 2 == 0:
+        raise ValueError("window must be an odd integer >= 3")
+    if n_sigmas <= 0:
+        raise ValueError("n_sigmas must be positive")
+
+    w = window // 2
+    n = x.size
+    medians = np.empty(n, dtype=float)
+    scores = np.empty(n, dtype=float)
+    for i in range(n):
+        lo = max(0, i - w)
+        hi = min(n, i + w + 1)
+        segment = x[lo:hi]
+        m = float(np.median(segment))
+        mad = float(np.median(np.abs(segment - m)))
+        scale = MAD_SCALE * mad  # consistent with modified z-score elsewhere
+        # MAD_SCALE is 0.6745 = 1/1.4826; score uses |x-m| / (1.4826 MAD)
+        # = MAD_SCALE * |x-m| / MAD when MAD > 0.
+        if mad > 0.0:
+            scores[i] = MAD_SCALE * abs(x[i] - m) / mad
+        else:
+            scores[i] = 0.0 if abs(x[i] - m) == 0.0 else np.inf
+        medians[i] = m
+    flags = (scores > n_sigmas).astype(int)
+    filtered = x.copy()
+    if impute:
+        filtered[flags.astype(bool)] = medians[flags.astype(bool)]
+    return {
+        "scores": scores,
+        "flags": flags,
+        "filtered": filtered,
+        "medians": medians,
+    }
+
+
+def hampel_flags(values, window: int = 7, n_sigmas: float = 3.0) -> np.ndarray:
+    """Return the 0/1 Hampel outlier flags for a univariate series."""
+    return hampel_filter(values, window=window, n_sigmas=n_sigmas, impute=False)["flags"]

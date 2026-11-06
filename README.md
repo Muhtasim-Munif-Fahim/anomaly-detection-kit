@@ -534,6 +534,20 @@ tests/
 python -m pytest tests -q
 ```
 
+
+## Hampel filter
+
+Rolling median / MAD outlier filter for univariate series (Pearson 2002).
+Points whose scaled absolute deviation from the local median exceeds
+`n_sigmas` are flagged and optionally replaced by that median:
+
+```python
+from anomaly_detection.classic import hampel_filter, hampel_flags
+
+out = hampel_filter(series, window=7, n_sigmas=3.0, impute=True)
+out["flags"], out["filtered"], out["scores"]
+```
+
 ## License
 
 MIT
