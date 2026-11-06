@@ -13,3 +13,4 @@ examples/output/
 *.ipynb_checkpoints/
 .coverage
 htmlcov/
+.venv/
