@@ -179,6 +179,25 @@ codisp = stream.score_stream(shingle(series, 4))
 
 The `rrcf` detector is also available in the CLI (`detect`/`evaluate`/`ensemble`).
 
+## LOCI (Local Correlation Integral)
+
+Papadimitriou et al. (ICDE 2003). For each point and a range of sampling radii
+`r`, LOCI compares the point's `alpha*r`-neighbour count with the average count
+of its `r`-neighbours (the multi-granularity deviation factor, MDEF). A point is
+flagged when `MDEF > k_sigma * sigma_MDEF` at any radius, so no contamination rate
+has to be chosen up front.
+
+```python
+from anomaly_detection import LOCI
+
+loci = LOCI(alpha=0.5, k_sigma=3.0, n_min=20, n_radii=30).fit(X)
+scores = loci.score_samples(X)     # max_r MDEF / sigma_MDEF
+flags = loci.flag(X)               # automatic 3-sigma rule
+loci.critical_radius_              # radius where each point deviates most
+```
+
+Also available from the CLI as `--detector loci`.
+
 ## Matrix-profile discords (anomalous subsequences)
 
 Point detectors miss anomalies whose individual values are ordinary but whose
@@ -482,6 +501,7 @@ Or without installing: `python -m anomaly_detection <command> ...`.
 | ABOD              | model         | higher = more anomalous                | `n_neighbors`               |
 | COF               | model         | higher = more anomalous                | `n_neighbors`               |
 | SOD               | model         | higher = more anomalous                | `n_neighbors`, `alpha`      |
+| LOCI              | model         | higher = more anomalous (MDEF / sigma) | `alpha`, `k_sigma`, `n_min` |
 | PCA               | model         | higher = more anomalous                | `n_components`              |
 | KDE               | model         | higher = more anomalous                | `bandwidth`, `standardize`  |
 | GMM               | model         | higher = more anomalous                | `n_components`, `seed`      |

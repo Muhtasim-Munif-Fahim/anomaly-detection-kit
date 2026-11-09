@@ -200,6 +200,7 @@ class TestParser:
             "eif",
             "hst",
             "rrcf",
+            "loci",
             "zscore",
             "mad",
             "iqr",

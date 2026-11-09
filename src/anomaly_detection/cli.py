@@ -27,6 +27,7 @@ from .combination import COMBINATION_METHODS, combine_scores, lscp_scores
 from .classic import STATISTICAL_SCORERS, matrix_profile_discords
 from .evaluate import best_f1_threshold, compare_detectors, evaluate_scores, threshold_sweep
 from .generators import make_tabular
+from .loci import LOCI
 from .rrcf import RobustRandomCutForest
 from .spectral_residual import spectral_residual
 from .models import (
@@ -54,7 +55,7 @@ from .models import (
 )
 
 STATISTICAL_ALIASES = {"zscore": "z-score", "mad": "modified z-score", "iqr": "IQR"}
-MODEL_NAMES = ["isolation_forest", "lof", "copod", "ecod", "hbos", "knn", "ocsvm", "elliptic", "cblof", "loda", "abod", "cof", "sod", "pca", "kde", "sos", "gmm", "inne", "eif", "hst", "rrcf"]
+MODEL_NAMES = ["isolation_forest", "lof", "copod", "ecod", "hbos", "knn", "ocsvm", "elliptic", "cblof", "loda", "abod", "cof", "sod", "pca", "kde", "sos", "gmm", "inne", "eif", "hst", "rrcf", "loci"]
 DETECTOR_NAMES = MODEL_NAMES + list(STATISTICAL_ALIASES)
 
 
@@ -101,6 +102,8 @@ def _detector_scores(name: str, X: np.ndarray, seed: Optional[int]) -> np.ndarra
         return HalfSpaceTrees(seed=0 if seed is None else seed).fit(X).score_samples(X)
     if name == "rrcf":
         return RobustRandomCutForest(seed=0 if seed is None else seed).fit(X).scores_
+    if name == "loci":
+        return LOCI().fit(X).score_samples(X)
     return STATISTICAL_SCORERS[STATISTICAL_ALIASES[name]](X)
 
 
