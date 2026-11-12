@@ -198,6 +198,26 @@ loci.critical_radius_              # radius where each point deviates most
 
 Also available from the CLI as `--detector loci`.
 
+## LDOF and Sampling (distance-based)
+
+`LDOF` (Zhang, Hutter & Jin 2009) divides a point's mean kNN distance by the
+mean pairwise distance *among* those neighbours, so a point far from a tight
+neighbourhood scores high even in scattered multi-density data.
+`SamplingOutlierDetector` (Sugiyama & Borgwardt 2013) scores every row by its
+distance to the nearest member of one small random subsample: very fast and
+surprisingly competitive.
+
+```python
+from anomaly_detection import LDOF, SamplingOutlierDetector
+
+ldof = LDOF(n_neighbors=20).fit(X)
+ldof.scores_, ldof.knn_distance_, ldof.inner_distance_
+samp = SamplingOutlierDetector(subsample_size=20, seed=0).fit(X)
+samp.scores_, samp.predict(X_new, contamination=0.05)
+```
+
+Both are available from the CLI as `--detector ldof` / `--detector sampling`.
+
 ## Matrix-profile discords (anomalous subsequences)
 
 Point detectors miss anomalies whose individual values are ordinary but whose
