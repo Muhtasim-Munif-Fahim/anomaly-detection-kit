@@ -201,6 +201,8 @@ class TestParser:
             "hst",
             "rrcf",
             "loci",
+            "ldof",
+            "sampling",
             "zscore",
             "mad",
             "iqr",
